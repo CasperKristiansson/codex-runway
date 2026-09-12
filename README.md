@@ -1,37 +1,26 @@
 # Codex Runway
 
-A native macOS menu-bar planner for several personal Codex accounts.
+A native macOS menu-bar app for tracking Codex account rate-limit windows.
 
-## V1 scope
+## What it does
 
-- Discovers each distinct signed-in account and adds it as its own row. There is no account-count or plan-tier limit.
-- Stores local, account-labelled rate-limit snapshots: usage percentage, next reset, banked resets, and refresh time.
-- Refreshes only the currently signed-in Codex account through the local Codex App Server's read-only `account/read` and `account/rateLimits/read` methods. Email and backend account ID identify a row; plan tier is display data only.
-- Lets an account remain visible but be excluded from planning.
-- Forecasts whether the selected account will last until its next reset from saved snapshots in the same reset window.
+- Discovers the currently signed-in Codex account and keeps each identity in its own row.
+- Shows usage, reset time, available reset credits, and saved refresh time.
+- Estimates whether an account is likely to last until its next reset from snapshots in the current window.
+- Lets you rename accounts or exclude them from planning without hiding them.
 
-V1 intentionally has no five-hour limit display, browser-session access, automated account switching, profile-token graph, or cloud service.
+## Privacy
 
-## Run
+Data stays local. Codex Runway uses the local Codex App Server's read-only account and rate-limit methods; it does not read browser cookies, store passwords, switch accounts, or use a cloud service.
+
+## Build
+
+Requires macOS and Swift.
 
 ```zsh
-cd /Users/casperkristiansson/programming/General/projects/active/tools/codex-runway
 swift run CodexRunway
-```
-
-Use **Refresh current** while an account is signed in to Codex. If its email/account ID has not been seen before, Codex Runway adds a row; it never uses a shared tier such as Pro 20× to decide which row to update. Use **Settings** to rename, exclude from planning, or remove stale legacy rows.
-
-## Test
-
-```zsh
 ./scripts/test.sh
-```
-
-## Package as a menu-bar app
-
-```zsh
 ./scripts/build-app.sh
-open "dist/Codex Runway.app"
 ```
 
-The bundle is ad-hoc signed for local use and is not notarized.
+The build script creates an ad-hoc-signed local app bundle in `dist/`.
