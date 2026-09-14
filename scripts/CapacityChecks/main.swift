@@ -25,6 +25,15 @@ struct CapacityChecks {
         let report = CapacityForecast.report(accounts: accounts, now: now)
         close(report.total, 9)
         close(report.remaining, 5)
+        var inactive = accounts[0]
+        inactive.isEnabled = false
+        inactive.planName = "Unsupported"
+        let activeOnly = CapacityForecast.report(accounts: [inactive, accounts[1], accounts[2]], now: now)
+        close(activeOnly.total, 5)
+        close(activeOnly.remaining, 3)
+        precondition(activeOnly.resets.count == 2)
+        let noneActive = CapacityForecast.report(accounts: [inactive], now: now)
+        precondition(noneActive.total == 0 && noneActive.history.isEmpty && noneActive.projection == nil)
         precondition(report.projection == nil && report.issue!.contains("Learning"))
         precondition(report.resets.count == 3 && report.resets.allSatisfy { !$0.hasEstimate })
 
@@ -122,7 +131,9 @@ struct CapacityChecks {
         precondition(CapacityForecast.report(accounts: [resetHistory], now: now).ratePerHour == nil,
             "A cross-reset pair must not count as a pace observation")
         let observedReset = CapacityForecast.report(accounts: [resetHistory], now: now).resets.first { !$0.projected }!
-        close(observedReset.after, 3.8)
+        precondition(observedReset.assumed)
+        close(observedReset.after, 4)
+        close(observedReset.date.timeIntervalSince(now), -6_500)
         var stale = tracked
         stale.snapshots = [UsageSnapshot(capturedAt: now.addingTimeInterval(-90_000), usedPercent: 40,
             resetAt: now.addingTimeInterval(3_600))]
@@ -137,7 +148,34 @@ struct CapacityChecks {
         var overdue = tracked
         overdue.snapshots = [UsageSnapshot(capturedAt: now.addingTimeInterval(-3_600), usedPercent: 90,
             resetAt: now.addingTimeInterval(-60))]
-        precondition(CapacityForecast.report(accounts: [overdue], now: now).issue!.contains("reset has passed"))
+        let assumed = CapacityForecast.report(accounts: [overdue], now: now)
+        close(assumed.remaining, 4)
+        precondition(assumed.hasAssumedResets && assumed.issue!.contains("Learning"))
+        precondition(overdue.latestSnapshot!.nextReset(at: now) == nil)
+        precondition(overdue.latestSnapshot!.usedPercent == 90, "Assumptions must not overwrite real readings")
+        precondition(assumed.resets.filter(\.assumed).count == 1)
+        precondition(!assumed.resets.contains(where: \.projected))
+        let boundary = overdue.latestSnapshot!.resetAt
+        close(overdue.latestSnapshot!.remainingPercent(at: boundary.addingTimeInterval(-1)), 10)
+        close(overdue.latestSnapshot!.remainingPercent(at: boundary), 100)
+        let mixed = CapacityForecast.report(accounts: [overdue, tracked], now: now)
+        close(mixed.remaining, 6.4)
+        precondition(mixed.resets.filter(\.projected).count == 1)
+        let mixedSimulation = CapacityForecast.simulate(accounts: [overdue, tracked], snapshots: [overdue.latestSnapshot!, tracked.latestSnapshot!], ratePerHour: 0.1, now: now)
+        close(mixedSimulation.points.first!.units, 6.4)
+        precondition(mixedSimulation.resets.count == 1 && mixedSimulation.points.allSatisfy { $0.date >= now })
+        let allUnknown = CapacityForecast.simulate(accounts: [overdue], snapshots: [overdue.latestSnapshot!], ratePerHour: 0.1, now: now)
+        precondition(allUnknown.resets.isEmpty && allUnknown.exhaustedAt != nil)
+        close(allUnknown.exhaustedAt!.timeIntervalSince(now), 40 * 3_600)
+        precondition(allUnknown.points.last!.date == now.addingTimeInterval(2 * 86_400))
+        let muchLater = CapacityForecast.report(accounts: [overdue], now: now.addingTimeInterval(20 * 86_400))
+        close(muchLater.remaining, 4)
+        precondition(muchLater.resets.filter(\.assumed).count == 1, "Never invent repeated resets")
+        overdue.snapshots.append(UsageSnapshot(capturedAt: now, usedPercent: 12, resetAt: now.addingTimeInterval(7 * 86_400)))
+        let confirmed = CapacityForecast.report(accounts: [overdue], now: now)
+        precondition(!confirmed.hasAssumedResets)
+        close(confirmed.remaining, 3.52)
+        precondition(overdue.latestSnapshot!.nextReset(at: now) != nil)
         var unknown = tracked
         unknown.planName = "Custom"
         precondition(CapacityForecast.report(accounts: [unknown], now: now).projection == nil)
@@ -154,13 +192,13 @@ struct CapacityChecks {
         missing.snapshots = []
         precondition(!CapacityForecast.report(accounts: [tracked, missing], now: now).hasBalance)
 
-        let many = (0..<3000).map { index in
+        let many = (0..<36000).map { index in
             UsageSnapshot(capturedAt: now.addingTimeInterval(-Double(index) * 900), usedPercent: 10,
                 resetAt: now.addingTimeInterval(3_600))
         }
         let retained = CapacityForecast.retainedSnapshots(many, now: now)
-        precondition(retained.count == 2881 && retained.count > 180)
-        precondition(retained.first!.capturedAt == now.addingTimeInterval(-30 * 86_400))
-        print("Capacity checks passed: weighting, resets, depletion, pace, freshness, and 30-day retention")
+        precondition(retained.count == 35041)
+        precondition(retained.first!.capturedAt == now.addingTimeInterval(-365 * 86_400))
+        print("Capacity checks passed: weighting, resets, depletion, pace, freshness, and one-year retention")
     }
 }

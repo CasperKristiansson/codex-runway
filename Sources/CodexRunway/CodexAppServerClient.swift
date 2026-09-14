@@ -11,11 +11,16 @@ struct ActiveCodexAccount {
     let rateLimits: RateLimitsReadResponse
 }
 
-struct AccountReadResponse: Decodable {
+struct ActiveAccountProfile {
+    let identity: AccountReadResponse
+    let usage: ProfileUsageResponse
+}
+
+struct AccountReadResponse: Decodable, Equatable {
     let account: ChatGPTAccount?
 }
 
-struct ChatGPTAccount: Decodable {
+struct ChatGPTAccount: Decodable, Equatable {
     let type: String
     let email: String?
     let planType: String?
@@ -55,13 +60,33 @@ enum CodexAppServerError: LocalizedError {
 }
 
 /// Uses Codex's documented local App Server protocol. It only asks for the currently signed-in
-/// account's rate-limit summary; it never reads browser cookies or authentication files.
+/// account's rate-limit and profile summaries; it never reads browser cookies or authentication files.
 actor CodexAppServerClient {
     private var process: Process?
     private var stdin: FileHandle?
     private var buffer = Data()
     private var pending: [Int: CheckedContinuation<Data, Error>] = [:]
     private var nextID = 1
+
+    func readActiveProfile(executablePath: String? = nil) async throws -> ActiveAccountProfile {
+        try start(executablePath: executablePath)
+        defer { stop() }
+        _ = try await request(method: "initialize", params: [
+            "clientInfo": ["name": "codex-runway", "version": "0.1.0"],
+            "capabilities": ["experimentalApi": true]
+        ])
+        notify(method: "initialized")
+        let before = try JSONDecoder().decode(AccountReadResponse.self,
+            from: await request(method: "account/read", params: ["refreshToken": false]))
+        let usage = try JSONDecoder().decode(ProfileUsageResponse.self,
+            from: await request(method: "account/usage/read", params: [:]))
+        let after = try JSONDecoder().decode(AccountReadResponse.self,
+            from: await request(method: "account/read", params: ["refreshToken": false]))
+        guard before == after, before.account?.email?.isEmpty == false else {
+            throw CodexAppServerError.server("Account changed during profile refresh. Try again.")
+        }
+        return ActiveAccountProfile(identity: before, usage: usage)
+    }
 
     func readActiveAccount(executablePath: String? = nil) async throws -> ActiveCodexAccount {
         try start(executablePath: executablePath)

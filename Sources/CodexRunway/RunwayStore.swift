@@ -8,18 +8,29 @@ final class RunwayStore: ObservableObject {
     @Published private(set) var activeAccountID: UUID?
     @Published var isRefreshing = false
     @Published var refreshError: String?
+    @Published var profileRefreshError: String?
+    @Published private(set) var isRefreshingProfile = false
 
     private let defaultsKey = "codex-runway.accounts.v1"
+    var dashboardAccounts: [CodexAccount] { accounts.filter(\.isEnabled) }
     private var refreshTimer: Timer?
     private var wakeObserver: NSObjectProtocol?
     private let defaults: UserDefaults
     private let readAccount: @MainActor () async throws -> ActiveCodexAccount
+    private let readProfile: @MainActor () async throws -> ActiveAccountProfile
+    private let now: () -> Date
 
-    init(defaults: UserDefaults = .standard, readAccount: @escaping @MainActor () async throws -> ActiveCodexAccount = {
+    init(defaults: UserDefaults = .standard,
+         now: @escaping () -> Date = { .now },
+         readProfile: @escaping @MainActor () async throws -> ActiveAccountProfile = {
+             try await CodexAppServerClient().readActiveProfile()
+         }, readAccount: @escaping @MainActor () async throws -> ActiveCodexAccount = {
         try await CodexAppServerClient().readActiveAccount()
     }) {
         self.defaults = defaults
         self.readAccount = readAccount
+        self.readProfile = readProfile
+        self.now = now
         load()
     }
 
@@ -48,6 +59,12 @@ final class RunwayStore: ObservableObject {
     func addAccount() {
         let account = CodexAccount(name: "Account \(accounts.count + 1)", planName: "Custom")
         accounts.append(account)
+        save()
+    }
+
+    func setAccountEnabled(id: UUID, enabled: Bool) {
+        guard let index = accounts.firstIndex(where: { $0.id == id }) else { return }
+        accounts[index].isEnabled = enabled
         save()
     }
 
@@ -93,7 +110,7 @@ final class RunwayStore: ObservableObject {
 
     /// Refreshes whichever account is currently signed in to Codex. Accounts are
     /// discovered by stable account ID and email, never by their plan tier.
-    func refreshActiveAccount() async {
+    func refreshActiveAccount(forceProfile: Bool = false) async {
         guard !isRefreshing else { return }
         isRefreshing = true
         refreshError = nil
@@ -130,12 +147,42 @@ final class RunwayStore: ObservableObject {
             accounts[index].snapshots.append(snapshot)
             for accountIndex in accounts.indices {
                 accounts[accountIndex].snapshots = CapacityForecast.retainedSnapshots(accounts[accountIndex].snapshots, now: snapshot.capturedAt)
+                let cutoff = ProfileCalendar.key(HistoryRetention.cutoff(now: now()))
+                accounts[accountIndex].profile?.dailyUsageBuckets.removeAll { $0.startDate < cutoff }
             }
             activeAccountID = accounts[index].id
             save()
+            await refreshProfileIfNeeded(accountID: accounts[index].id, force: forceProfile)
         } catch {
             activeAccountID = nil
             refreshError = error.localizedDescription
+        }
+    }
+
+    func refreshProfile() async {
+        // Re-resolve the signed-in identity before a manual request; a selected
+        // saved profile is never used as an authentication target.
+        await refreshActiveAccount(forceProfile: true)
+    }
+
+    private func refreshProfileIfNeeded(accountID: UUID, force: Bool) async {
+        guard let account = accounts.first(where: { $0.id == accountID }),
+              force || AccountProfile.needsRefresh(account.profile, now: now()) else { return }
+        isRefreshingProfile = true
+        profileRefreshError = nil
+        defer { isRefreshingProfile = false }
+        do {
+            let response = try await readProfile()
+            guard normalizedEmail(response.identity.account?.email) == normalizedEmail(account.email),
+                  let index = accounts.firstIndex(where: { $0.id == accountID }) else {
+                throw CodexAppServerError.server("Account changed during profile refresh. Try again.")
+            }
+            accounts[index].profile = AccountProfile.merging(response.usage, into: accounts[index].profile, now: now())
+            save()
+        } catch {
+            // A failed profile request must not erase quota data, its current
+            // identity, or the last successful profile/freshness timestamp.
+            profileRefreshError = error.localizedDescription
         }
     }
 

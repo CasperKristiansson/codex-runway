@@ -26,6 +26,10 @@ struct CapacityGraphView: View {
                 summary(report)
                     .font(.caption)
                     .fixedSize(horizontal: false, vertical: true)
+                if report.hasAssumedResets {
+                    Text("Includes assumed resets · next dates unknown until synced")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
                 if report.total > 0 {
                     graph(report, now: context.date)
                         .frame(height: 100)
@@ -43,13 +47,13 @@ struct CapacityGraphView: View {
         } else if let projection = report.projection, let rate = report.ratePerHour {
             VStack(alignment: .leading, spacing: 3) {
                 if rate == 0 {
-                    Text("No usage observed · balance stays flat until reset")
+                    Text("No usage observed · estimated balance stays flat")
                         .foregroundStyle(.secondary)
                 } else if let exhaustion = projection.exhaustedAt {
                     Text("May run out \(exhaustion.formatted(.dateTime.month(.abbreviated).day().hour().minute())) · slow down ~\(Int((report.reductionPercent ?? 0).rounded(.up)))%")
                         .foregroundStyle(Color(red: 0.55, green: 0.20, blue: 0.06))
                 } else {
-                    Text("Pace fits the next resets · lowest balance \(projection.minimum, specifier: "%.1f") units")
+                    Text("\(report.hasAssumedResets ? "Estimated runway" : "Pace fits the next resets") · lowest balance \(projection.minimum, specifier: "%.1f") units")
                         .foregroundStyle(.indigo)
                 }
                 Text("\(rate * 24, specifier: "%.2f") units/day · \(averageLabel(report))")
@@ -95,7 +99,7 @@ struct CapacityGraphView: View {
             ForEach(report.resets.filter { $0.date >= start && $0.date <= end }) { reset in
                 RuleMark(x: .value("Reset", reset.date))
                     .foregroundStyle(.teal.opacity(0.55))
-                    .lineStyle(StrokeStyle(lineWidth: 1, dash: reset.projected ? [2, 3] : []))
+                    .lineStyle(StrokeStyle(lineWidth: 1, dash: reset.projected || reset.assumed ? [2, 3] : []))
             }
             if let reset = nextReset {
                 RuleMark(x: .value("Next reset", reset.date))

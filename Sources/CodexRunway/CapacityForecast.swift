@@ -15,6 +15,7 @@ struct CapacityReset: Identifiable {
     let after: Double
     let projected: Bool
     var hasEstimate = true
+    var assumed = false
 }
 
 struct CapacitySimulation {
@@ -37,6 +38,7 @@ struct CapacityReport {
     var horizon: Date
     var issue: String?
     var hasStaleReadings = false
+    var hasAssumedResets = false
     var notes: [String] = []
 }
 
@@ -55,9 +57,9 @@ enum CapacityForecast {
         return lower.units + (upper.units - lower.units) * fraction
     }
 
-    // Keep the complete 30-day history, not a fixed number of refreshes.
+    // Retention is independent of the thirty-day forecast pace window.
     static func retainedSnapshots(_ snapshots: [UsageSnapshot], now: Date) -> [UsageSnapshot] {
-        snapshots.filter { $0.capturedAt >= now.addingTimeInterval(-30 * day) }
+        snapshots.filter { $0.capturedAt >= HistoryRetention.cutoff(now: now) }
             .sorted { $0.capturedAt < $1.capturedAt }
     }
 
@@ -66,6 +68,7 @@ enum CapacityForecast {
     }
 
     static func report(accounts: [CodexAccount], now: Date = .now) -> CapacityReport {
+        let accounts = accounts.filter(\.isEnabled)
         var result = CapacityReport(horizon: now.addingTimeInterval(day))
         guard !accounts.isEmpty else {
             result.issue = "Refresh your accounts to start the combined history."
@@ -79,31 +82,45 @@ enum CapacityForecast {
         let ordered = accounts.map { account in
             retainedSnapshots(account.snapshots, now: now).filter { $0.capturedAt <= now }
         }
-        let events = ordered.enumerated().flatMap { index, snapshots in
-            snapshots.map { (index: index, snapshot: $0) }
-        }.sorted { $0.snapshot.capturedAt < $1.snapshot.capturedAt }
+        // Insert derived reset events between actual readings. They are not
+        // persisted and are excluded from the observed-consumption average.
+        typealias HistoryEvent = (index: Int, snapshot: UsageSnapshot, date: Date, assumed: Bool)
+        var events: [HistoryEvent] = []
+        for (index, snapshots) in ordered.enumerated() {
+            for (offset, snapshot) in snapshots.enumerated() {
+                events.append((index: index, snapshot: snapshot, date: snapshot.capturedAt, assumed: false))
+                let nextDate = offset + 1 < snapshots.count ? snapshots[offset + 1].capturedAt : now
+                if snapshot.resetAt > snapshot.capturedAt && snapshot.resetAt <= min(nextDate, now) {
+                    events.append((index: index, snapshot: snapshot, date: snapshot.resetAt, assumed: true))
+                }
+            }
+        }
+        events.sort { $0.date == $1.date ? ($0.assumed && !$1.assumed) : $0.date < $1.date }
         var known: [Int: UsageSnapshot] = [:]
+        var assumedAccounts: Set<Int> = []
         var segment = 0
         for event in events {
             let previous = known[event.index]
-            let date = event.snapshot.capturedAt
-            let reset = previous.map { abs($0.resetAt.timeIntervalSince(event.snapshot.resetAt)) > 60 } ?? false
+            let date = event.date
+            let reset = event.assumed || (!assumedAccounts.contains(event.index) && (previous.map { abs($0.resetAt.timeIntervalSince(event.snapshot.resetAt)) > 60 } ?? false))
             let before = known.reduce(0.0) { sum, pair in
-                sum + remaining(pair.value, weight: pair.value.capacityUnits ?? accounts[pair.key].capacityUnits!)
+                let weight = pair.value.capacityUnits ?? accounts[pair.key].capacityUnits!
+                return sum + (assumedAccounts.contains(pair.key) ? weight : remaining(pair.value, weight: weight))
             }
             let wasComplete = known.count == accounts.count
             known[event.index] = event.snapshot
+            if event.assumed || event.snapshot.assumesReset(at: date) { assumedAccounts.insert(event.index) }
+            else { assumedAccounts.remove(event.index) }
             guard known.count == accounts.count else { continue }
             let after = known.reduce(0.0) { sum, pair in
-                sum + remaining(pair.value, weight: pair.value.capacityUnits ?? accounts[pair.key].capacityUnits!)
+                let weight = pair.value.capacityUnits ?? accounts[pair.key].capacityUnits!
+                return sum + (assumedAccounts.contains(pair.key) ? weight : remaining(pair.value, weight: weight))
             }
-            // An overdue saved window cannot supply a current combined balance.
-            guard known.values.allSatisfy({ $0.resetAt > date }) else { segment += 1; continue }
             if let last = result.history.last, date.timeIntervalSince(last.date) > 3_600 { segment += 1 }
             if reset && wasComplete {
                 result.history.append(CapacityPoint(date: date, units: before, segment: segment))
                 result.resets.append(CapacityReset(date: date, accountName: accounts[event.index].name,
-                    before: before, after: after, projected: false))
+                    before: before, after: after, projected: false, assumed: event.assumed))
             }
             result.history.append(CapacityPoint(date: date, units: after, segment: segment))
         }
@@ -113,9 +130,11 @@ enum CapacityForecast {
             return result
         }
         let latest = ordered.map { $0.last! }
-        result.remaining = zip(accounts, latest).reduce(0) { $0 + remaining($1.1, weight: $1.0.capacityUnits!) }
+        result.remaining = zip(accounts, latest).reduce(0) { $0 + $1.0.capacityUnits! * $1.1.remainingPercent(at: now) / 100 }
         result.hasBalance = true
-        result.horizon = max(now, latest.map(\.resetAt).max()!)
+        result.hasAssumedResets = latest.contains { $0.assumesReset(at: now) }
+        result.horizon = latest.compactMap { $0.nextReset(at: now) }.max() ?? now.addingTimeInterval(2 * day)
+        result.history.append(CapacityPoint(date: now, units: result.remaining, segment: segment))
         result.resets += accounts.indices.compactMap { index in
             guard latest[index].resetAt > now else { return nil }
             return CapacityReset(date: latest[index].resetAt, accountName: accounts[index].name,
@@ -123,10 +142,6 @@ enum CapacityForecast {
         }
         if zip(accounts, latest).contains(where: { ($0.1.capacityUnits ?? $0.0.capacityUnits!) != $0.0.capacityUnits! }) {
             result.issue = "An account’s plan changed. Refresh it to establish its new capacity."
-            return result
-        }
-        if latest.contains(where: { $0.resetAt <= now }) {
-            result.issue = "A saved reset has passed. Sign in to that account and refresh to update the forecast."
             return result
         }
         let durations = Set(latest.compactMap(\.windowDurationMins))
@@ -201,12 +216,25 @@ enum CapacityForecast {
     }
 
     static func simulate(accounts: [CodexAccount], snapshots: [UsageSnapshot], ratePerHour: Double, now: Date) -> CapacitySimulation {
-        var balances = zip(accounts, snapshots).map { remaining($0.1, weight: $0.0.capacityUnits!) }
-        var pending = Array(accounts.indices).sorted { snapshots[$0].resetAt < snapshots[$1].resetAt }
+        var balances = zip(accounts, snapshots).map { $0.0.capacityUnits! * $0.1.remainingPercent(at: now) / 100 }
+        var pending = accounts.indices.filter { snapshots[$0].nextReset(at: now) != nil }.sorted { snapshots[$0].resetAt < snapshots[$1].resetAt }
         var result = CapacitySimulation()
         var date = now
         result.minimum = balances.reduce(0, +)
         result.points.append(CapacityPoint(date: now, units: result.minimum, segment: 0))
+        if pending.isEmpty {
+            // All next reset dates are unknown. Show a bounded two-day burn
+            // estimate without inventing another refill or a repeating cycle.
+            let horizon = now.addingTimeInterval(2 * day)
+            let total = result.minimum
+            if ratePerHour > 0 && ratePerHour * 48 > total {
+                let exhaustion = now.addingTimeInterval(total / ratePerHour * 3_600)
+                result.exhaustedAt = exhaustion
+                result.points.append(CapacityPoint(date: exhaustion, units: 0, segment: 0))
+            }
+            result.minimum = max(0, total - ratePerHour * 48)
+            result.points.append(CapacityPoint(date: horizon, units: result.minimum, segment: 0))
+        }
         while let next = pending.first {
             let resetAt = snapshots[next].resetAt
             let hours = max(0, resetAt.timeIntervalSince(date) / 3_600)

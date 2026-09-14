@@ -33,6 +33,14 @@ struct UsageSnapshot: Codable, Identifiable, Equatable {
     var secondaryUsedPercent: Double? = nil
     var secondaryResetAt: Date? = nil
 
+    // A derived assumption, never a fabricated server reading. The original
+    // timestamp and usage remain available for history and pace calculations.
+    func assumesReset(at now: Date) -> Bool { resetAt <= now }
+    func remainingPercent(at now: Date) -> Double {
+        assumesReset(at: now) ? 100 : min(100, max(0, 100 - usedPercent))
+    }
+    func nextReset(at now: Date) -> Date? { assumesReset(at: now) ? nil : resetAt }
+
     init(
         id: UUID = UUID(),
         capturedAt: Date = .now,
@@ -55,6 +63,8 @@ struct CodexAccount: Codable, Identifiable, Equatable {
     var planName: String
     var externalAccountID: String?
     var snapshots: [UsageSnapshot]
+    var isEnabled: Bool
+    var profile: AccountProfile? = nil
 
     init(
         id: UUID = UUID(),
@@ -62,7 +72,8 @@ struct CodexAccount: Codable, Identifiable, Equatable {
         email: String = "",
         planName: String,
         externalAccountID: String? = nil,
-        snapshots: [UsageSnapshot] = []
+        snapshots: [UsageSnapshot] = [],
+        isEnabled: Bool = true
     ) {
         self.id = id
         self.name = name
@@ -70,6 +81,19 @@ struct CodexAccount: Codable, Identifiable, Equatable {
         self.planName = planName
         self.externalAccountID = externalAccountID
         self.snapshots = snapshots
+        self.isEnabled = isEnabled
+    }
+
+    init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        id = try values.decode(UUID.self, forKey: .id)
+        name = try values.decode(String.self, forKey: .name)
+        email = try values.decode(String.self, forKey: .email)
+        planName = try values.decode(String.self, forKey: .planName)
+        externalAccountID = try values.decodeIfPresent(String.self, forKey: .externalAccountID)
+        snapshots = try values.decode([UsageSnapshot].self, forKey: .snapshots)
+        isEnabled = try values.decodeIfPresent(Bool.self, forKey: .isEnabled) ?? true
+        profile = try values.decodeIfPresent(AccountProfile.self, forKey: .profile)
     }
 
     var latestSnapshot: UsageSnapshot? {

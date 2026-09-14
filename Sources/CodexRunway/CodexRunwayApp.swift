@@ -35,7 +35,7 @@ struct MenuBarView: View {
         VStack(alignment: .leading, spacing: 10) {
             header
 
-            if !store.accounts.isEmpty {
+            if !store.dashboardAccounts.isEmpty {
                 CapacityGraphView()
             }
 
@@ -43,19 +43,23 @@ struct MenuBarView: View {
                 Text("Your signed-in Codex account will appear after refresh. Other accounts are added when you sign in to them.")
                     .font(.callout)
                     .foregroundStyle(.secondary)
+            } else if store.dashboardAccounts.isEmpty {
+                Text("All accounts are inactive. Activate an account in Settings to show it here.")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
             }
-            if store.accounts.count > 3 {
+            if store.dashboardAccounts.count > 3 {
                 // The first three cards provide the scroll area's actual
                 // content height, including wrapped dates and card spacing.
-                accountList(Array(store.accounts.prefix(3)))
+                accountList(Array(store.dashboardAccounts.prefix(3)))
                     .hidden()
                     .overlay {
                         ScrollView {
-                            accountList(store.accounts)
+                            accountList(store.dashboardAccounts)
                         }
                     }
             } else {
-                accountList(store.accounts)
+                accountList(store.dashboardAccounts)
             }
 
             Divider()
@@ -161,6 +165,12 @@ private struct AccountCard: View {
     let isActive: Bool
 
     var body: some View {
+        TimelineView(.periodic(from: .now, by: 60)) { context in
+            card(now: context.date)
+        }
+    }
+
+    private func card(now: Date) -> some View {
         VStack(alignment: .leading, spacing: 6) {
             HStack {
                 VStack(alignment: .leading, spacing: 1) {
@@ -175,7 +185,7 @@ private struct AccountCard: View {
                 Spacer()
                 if let snapshot = account.latestSnapshot {
                     VStack(alignment: .trailing, spacing: 2) {
-                        Text("\(min(100, max(0, 100 - snapshot.usedPercent)), specifier: "%.0f")% left")
+                        Text("\(snapshot.remainingPercent(at: now), specifier: "%.0f")% left")
                             .font(.subheadline.weight(.medium))
                         if snapshot.bankedResetCount > 0 {
                             Text("\(snapshot.bankedResetCount) banked")
@@ -191,11 +201,11 @@ private struct AccountCard: View {
             }
 
             if let snapshot = account.latestSnapshot {
-                ProgressView(value: min(100, max(0, 100 - snapshot.usedPercent)), total: 100)
+                ProgressView(value: snapshot.remainingPercent(at: now), total: 100)
                     .tint(isActive ? Color.indigo.opacity(0.7) : Color.gray.opacity(0.55))
                 TimelineView(.periodic(from: .now, by: 60)) { context in
-                    let updated = "Last updated: \(StatusDates.elapsed(since: snapshot.capturedAt, now: context.date))"
-                    let reset = "Next reset: \(StatusDates.reset(snapshot.resetAt, now: context.date))"
+                    let updated = "\(snapshot.assumesReset(at: context.date) ? "Reset assumed · Synced" : "Last updated"): \(StatusDates.elapsed(since: snapshot.capturedAt, now: context.date))"
+                    let reset = snapshot.nextReset(at: context.date).map { "Next reset: \(StatusDates.reset($0, now: context.date))" } ?? "Next reset: Unknown"
                     ViewThatFits(in: .horizontal) {
                         HStack {
                             Text(updated).fixedSize()
