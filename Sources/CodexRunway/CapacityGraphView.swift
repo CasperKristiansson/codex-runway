@@ -3,6 +3,24 @@ import SwiftUI
 
 private final class CapacityGraphSelection: ObservableObject {
     @Published var date: Date?
+    @Published var range: CapacityGraphRange {
+        didSet { UserDefaults.standard.set(range.rawValue, forKey: "codex-runway.graph-range.v1") }
+    }
+
+    init() {
+        range = CapacityGraphRange(rawValue: UserDefaults.standard.string(forKey: "codex-runway.graph-range.v1") ?? "") ?? .overview
+    }
+}
+
+private enum CapacityGraphRange: String, CaseIterable, Identifiable {
+    case overview, hour, sixHours, day, week
+    var id: String { rawValue }
+    var label: String {
+        switch self { case .overview: "Overview"; case .hour: "1h"; case .sixHours: "6h"; case .day: "1d"; case .week: "7d" }
+    }
+    var lookback: TimeInterval? {
+        switch self { case .overview: nil; case .hour: 3_600; case .sixHours: 21_600; case .day: 86_400; case .week: 7 * 86_400 }
+    }
 }
 
 struct CapacityGraphView: View {
@@ -15,6 +33,14 @@ struct CapacityGraphView: View {
             VStack(alignment: .leading, spacing: 8) {
                 HStack {
                     Text("Combined runway").font(.subheadline.weight(.semibold))
+                    Picker("Graph range", selection: $selection.range) {
+                        ForEach(CapacityGraphRange.allCases) { range in Text(range.label).tag(range) }
+                    }
+                    .labelsHidden()
+                    .pickerStyle(.menu)
+                    .controlSize(.small)
+                    .fixedSize()
+                    .onChange(of: selection.range) { _, _ in selection.date = nil }
                     Spacer()
                     if report.hasBalance {
                         Text("\(report.remaining, specifier: "%.1f") / \(report.total, specifier: "%.0f") units")
@@ -23,15 +49,20 @@ struct CapacityGraphView: View {
                         Text("— / \(report.total, specifier: "%.0f") units").font(.subheadline)
                     }
                 }
-                summary(report)
-                    .font(.caption)
-                    .fixedSize(horizontal: false, vertical: true)
-                if report.hasAssumedResets {
-                    Text("Includes assumed resets · next dates unknown until synced")
+                if selection.range == .overview {
+                    summary(report)
+                        .font(.caption)
+                        .fixedSize(horizontal: false, vertical: true)
+                    if report.hasAssumedResets {
+                        Text("Includes assumed resets · next dates unknown until synced")
+                            .font(.caption).foregroundStyle(.secondary)
+                    }
+                } else {
+                    Text("Past \(selection.range.label) · history only")
                         .font(.caption).foregroundStyle(.secondary)
                 }
                 if report.total > 0 {
-                    graph(report, now: context.date)
+                    graph(report, range: selection.range, now: context.date)
                         .frame(height: 100)
                 }
             }
@@ -69,21 +100,27 @@ struct CapacityGraphView: View {
         return "\(history) average"
     }
 
-    private func graph(_ report: CapacityReport, now: Date) -> some View {
-        let start = now.addingTimeInterval(-2 * CapacityForecast.day)
-        let futureResets = report.resets.filter { $0.projected && $0.date > now }
+    private func graph(_ report: CapacityReport, range: CapacityGraphRange, now: Date) -> some View {
+        let isOverview = range == .overview
+        let start = now.addingTimeInterval(-(range.lookback ?? 2 * CapacityForecast.day))
+        let futureResets = isOverview ? report.resets.filter { $0.projected && $0.date > now } : []
         let nextReset = futureResets.min { $0.date < $1.date }
-        let end = max(now.addingTimeInterval(2 * CapacityForecast.day),
-                      (futureResets.map(\.date).max() ?? now).addingTimeInterval(0.25 * CapacityForecast.day))
+        let end = isOverview ? max(now.addingTimeInterval(2 * CapacityForecast.day),
+                                   (futureResets.map(\.date).max() ?? now).addingTimeInterval(0.25 * CapacityForecast.day)) : now
         // Include the preceding reading so the line can enter the visible range.
         let preceding = report.history.last { $0.date < start }
-        let history = (preceding.map { [$0] } ?? []) + report.history.filter { $0.date >= start }
+        let visibleHistory = report.history.filter { $0.date >= start && $0.date <= end }
+        let history = (preceding.map { [$0] } ?? []) + visibleHistory
+        let visibleResets = report.resets.filter { $0.date >= start && $0.date <= end && (isOverview || !$0.projected) }
+        let yDomain = isOverview ? 0...max(report.total, history.map(\.units).max() ?? 0) : historicalDomain(visibleHistory, total: report.total)
         return Chart {
-            RectangleMark(xStart: .value("Today", now), xEnd: .value("Future", end),
-                          yStart: .value("Minimum", 0), yEnd: .value("Maximum", report.total))
-                .foregroundStyle(Color.indigo.opacity(0.045))
+            if isOverview {
+                RectangleMark(xStart: .value("Today", now), xEnd: .value("Future", end),
+                              yStart: .value("Minimum", 0), yEnd: .value("Maximum", report.total))
+                    .foregroundStyle(Color.indigo.opacity(0.045))
+            }
             ForEach(history) { point in
-                LineMark(x: .value("Date", point.date), y: .value("Units", point.units), series: .value("Series", "history"))
+                LineMark(x: .value("Date", point.date), y: .value("Units", point.units), series: .value("Series", "history-\(point.segment)"))
                     .foregroundStyle(.indigo)
                     .interpolationMethod(.linear)
                     .lineStyle(StrokeStyle(lineWidth: 1.8))
@@ -91,12 +128,12 @@ struct CapacityGraphView: View {
                     .foregroundStyle(.indigo.opacity(0.65))
                     .symbolSize(5)
             }
-            ForEach(report.projection?.points ?? []) { point in
+            ForEach(isOverview ? (report.projection?.points ?? []) : []) { point in
                 LineMark(x: .value("Date", point.date), y: .value("Units", point.units), series: .value("Series", "projection"))
                     .foregroundStyle(.indigo)
                     .lineStyle(StrokeStyle(lineWidth: 2, dash: [4, 3]))
             }
-            ForEach(report.resets.filter { $0.date >= start && $0.date <= end }) { reset in
+            ForEach(visibleResets) { reset in
                 RuleMark(x: .value("Reset", reset.date))
                     .foregroundStyle(.teal.opacity(0.55))
                     .lineStyle(StrokeStyle(lineWidth: 1, dash: reset.projected || reset.assumed ? [2, 3] : []))
@@ -112,9 +149,11 @@ struct CapacityGraphView: View {
                         .lineStyle(StrokeStyle(lineWidth: 1, dash: [3, 3]))
                 }
             }
-            RuleMark(x: .value("Now", now))
-                .foregroundStyle(Color.indigo.opacity(0.85))
-                .lineStyle(StrokeStyle(lineWidth: 2))
+            if isOverview {
+                RuleMark(x: .value("Now", now))
+                    .foregroundStyle(Color.indigo.opacity(0.85))
+                    .lineStyle(StrokeStyle(lineWidth: 2))
+            }
             if report.hasBalance {
                 PointMark(x: .value("Today", now), y: .value("Current balance", report.remaining))
                     .foregroundStyle(.indigo)
@@ -127,20 +166,20 @@ struct CapacityGraphView: View {
         .chartLegend(.hidden)
         .chartXScale(domain: start...end)
         .chartPlotStyle { plot in plot.clipped() }
-        .chartYScale(domain: 0...max(report.total, history.map(\.units).max() ?? 0))
+        .chartYScale(domain: yDomain)
         .chartXAxis {
-            AxisMarks(values: [start, now.addingTimeInterval(-CapacityForecast.day), now, now.addingTimeInterval(end.timeIntervalSince(now) / 2), end]) { value in
+            AxisMarks(values: axisDates(from: start, through: end)) { value in
                 AxisGridLine().foregroundStyle(.gray.opacity(0.12))
                 AxisValueLabel {
                     if let date = value.as(Date.self) {
-                        Text(abs(date.timeIntervalSince(now)) < 1 ? "Today" : date.formatted(.dateTime.day().month(.abbreviated)))
+                        Text(axisLabel(date, range: range, now: now))
                             .font(.system(size: 9, weight: abs(date.timeIntervalSince(now)) < 1 ? .bold : .regular)).fixedSize()
                     }
                 }
             }
         }
         .chartYAxis {
-            AxisMarks(position: .leading, values: [0, report.total / 2, report.total]) { value in
+            AxisMarks(position: .leading, values: [yDomain.lowerBound, (yDomain.lowerBound + yDomain.upperBound) / 2, yDomain.upperBound]) { value in
                 AxisGridLine().foregroundStyle(.gray.opacity(0.15))
                 AxisValueLabel {
                     if let units = value.as(Double.self) {
@@ -174,17 +213,52 @@ struct CapacityGraphView: View {
             }
         }
         .overlay(alignment: .topLeading) {
-            if let date = selection.date,
-               let value = CapacityForecast.value(at: date, in: date > now ? (report.projection?.points ?? []) : report.history) {
-                Text("\(date.formatted(.dateTime.day().month(.abbreviated).hour().minute())) · \(value, specifier: "%.1f") units")
+            if let date = selection.date {
+                let reset = visibleResets.min { abs($0.date.timeIntervalSince(date)) < abs($1.date.timeIntervalSince(date)) }
+                let tolerance = end.timeIntervalSince(start) / 55
+                let nearbyReset = reset.flatMap { abs($0.date.timeIntervalSince(date)) <= tolerance ? $0 : nil }
+                let points = isOverview && date > now ? (report.projection?.points ?? []) : report.history
+                if let nearbyReset {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("\(nearbyReset.accountName) · \(nearbyReset.assumed ? "Assumed reset" : nearbyReset.projected ? "Upcoming reset" : "Confirmed reset")")
+                            .fontWeight(.semibold)
+                        Text(nearbyReset.date.formatted(.dateTime.day().month(.abbreviated).hour().minute()))
+                    }
+                    .font(.system(size: 10)).padding(.horizontal, 7).padding(.vertical, 5)
+                    .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 8)).allowsHitTesting(false)
+                } else if let value = CapacityForecast.value(at: date, in: points) {
+                    Text("\(date.formatted(.dateTime.day().month(.abbreviated).hour().minute())) · \(value, specifier: "%.1f") units")
                     .font(.system(size: 10))
                     .padding(.horizontal, 6)
                     .padding(.vertical, 4)
                     .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 8))
                     .allowsHitTesting(false)
+                }
             }
         }
-        .accessibilityLabel("Combined allowance remaining over the past 2 days through upcoming account resets. History connects saved readings; future balances are estimates. The horizontal guide shows the estimated balance before the next reset.")
+        .accessibilityLabel(isOverview ? "Combined allowance history and forecast through upcoming account resets." : "Combined allowance history for the past \(range.label), including confirmed and assumed resets.")
+    }
+
+    private func historicalDomain(_ points: [CapacityPoint], total: Double) -> ClosedRange<Double> {
+        let values = points.map(\.units)
+        guard let minimum = values.min(), let maximum = values.max() else { return 0...max(1, total) }
+        let padding = max((maximum - minimum) * 0.12, max(total * 0.025, 0.1))
+        var lower = max(0, minimum - padding), upper = min(total, maximum + padding)
+        if upper - lower < 0.2 {
+            lower = max(0, minimum - 0.1); upper = min(total, maximum + 0.1)
+        }
+        if upper <= lower { upper = lower + 0.2 }
+        return lower...upper
+    }
+
+    private func axisDates(from start: Date, through end: Date) -> [Date] {
+        (0...4).map { start.addingTimeInterval(end.timeIntervalSince(start) * Double($0) / 4) }
+    }
+
+    private func axisLabel(_ date: Date, range: CapacityGraphRange, now: Date) -> String {
+        if range == .overview { return abs(date.timeIntervalSince(now)) < 1 ? "Today" : date.formatted(.dateTime.day().month(.abbreviated)) }
+        if range == .week { return date.formatted(.dateTime.weekday(.abbreviated)) }
+        return date.formatted(.dateTime.hour().minute())
     }
 
 }

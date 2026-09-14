@@ -52,7 +52,8 @@ enum CapacityForecast {
               date >= first.date, date <= last.date,
               let lower = points.last(where: { $0.date <= date }) else { return nil }
         guard lower.date != date,
-              let upper = points.first(where: { $0.date > date }) else { return lower.units }
+              let upper = points.first(where: { $0.date > date }),
+              lower.segment == upper.segment else { return lower.date == date ? lower.units : nil }
         let fraction = date.timeIntervalSince(lower.date) / upper.date.timeIntervalSince(lower.date)
         return lower.units + (upper.units - lower.units) * fraction
     }
@@ -84,14 +85,16 @@ enum CapacityForecast {
         }
         // Insert derived reset events between actual readings. They are not
         // persisted and are excluded from the observed-consumption average.
-        typealias HistoryEvent = (index: Int, snapshot: UsageSnapshot, date: Date, assumed: Bool)
+        typealias HistoryEvent = (index: Int, snapshot: UsageSnapshot, date: Date, reset: Bool, assumed: Bool)
         var events: [HistoryEvent] = []
         for (index, snapshots) in ordered.enumerated() {
             for (offset, snapshot) in snapshots.enumerated() {
-                events.append((index: index, snapshot: snapshot, date: snapshot.capturedAt, assumed: false))
+                events.append((index: index, snapshot: snapshot, date: snapshot.capturedAt, reset: false, assumed: false))
                 let nextDate = offset + 1 < snapshots.count ? snapshots[offset + 1].capturedAt : now
                 if snapshot.resetAt > snapshot.capturedAt && snapshot.resetAt <= min(nextDate, now) {
-                    events.append((index: index, snapshot: snapshot, date: snapshot.resetAt, assumed: true))
+                    let next = offset + 1 < snapshots.count ? snapshots[offset + 1] : nil
+                    let wasConfirmedLater = next.map { abs($0.resetAt.timeIntervalSince(snapshot.resetAt)) > 60 } ?? false
+                    events.append((index: index, snapshot: snapshot, date: snapshot.resetAt, reset: true, assumed: !wasConfirmedLater))
                 }
             }
         }
@@ -102,14 +105,14 @@ enum CapacityForecast {
         for event in events {
             let previous = known[event.index]
             let date = event.date
-            let reset = event.assumed || (!assumedAccounts.contains(event.index) && (previous.map { abs($0.resetAt.timeIntervalSince(event.snapshot.resetAt)) > 60 } ?? false))
+            let reset = event.reset || (!assumedAccounts.contains(event.index) && (previous.map { abs($0.resetAt.timeIntervalSince(event.snapshot.resetAt)) > 60 } ?? false))
             let before = known.reduce(0.0) { sum, pair in
                 let weight = pair.value.capacityUnits ?? accounts[pair.key].capacityUnits!
                 return sum + (assumedAccounts.contains(pair.key) ? weight : remaining(pair.value, weight: weight))
             }
             let wasComplete = known.count == accounts.count
             known[event.index] = event.snapshot
-            if event.assumed || event.snapshot.assumesReset(at: date) { assumedAccounts.insert(event.index) }
+            if event.reset { assumedAccounts.insert(event.index) }
             else { assumedAccounts.remove(event.index) }
             guard known.count == accounts.count else { continue }
             let after = known.reduce(0.0) { sum, pair in
@@ -134,6 +137,7 @@ enum CapacityForecast {
         result.hasBalance = true
         result.hasAssumedResets = latest.contains { $0.assumesReset(at: now) }
         result.horizon = latest.compactMap { $0.nextReset(at: now) }.max() ?? now.addingTimeInterval(2 * day)
+        if let last = result.history.last, now.timeIntervalSince(last.date) > 3_600 { segment += 1 }
         result.history.append(CapacityPoint(date: now, units: result.remaining, segment: segment))
         result.resets += accounts.indices.compactMap { index in
             guard latest[index].resetAt > now else { return nil }

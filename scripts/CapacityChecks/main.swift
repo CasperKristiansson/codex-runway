@@ -16,6 +16,10 @@ struct CapacityChecks {
         precondition(CapacityForecast.value(at: now.addingTimeInterval(-1), in: hoverPoints) == nil)
         precondition(CapacityForecast.value(at: now.addingTimeInterval(101), in: hoverPoints) == nil)
         precondition(CapacityForecast.value(at: now, in: []) == nil)
+        let gapPoints = [CapacityPoint(date: now, units: 4, segment: 0),
+                         CapacityPoint(date: now.addingTimeInterval(100), units: 3, segment: 1)]
+        precondition(CapacityForecast.value(at: now.addingTimeInterval(50), in: gapPoints) == nil,
+            "Hover must not interpolate across an unobserved gap")
         func account(_ name: String, plan: String = "Pro 20×", used: Double, resetHours: Double) -> CodexAccount {
             CodexAccount(name: name, planName: plan, snapshots: [UsageSnapshot(capturedAt: now,
                 usedPercent: used, resetAt: now.addingTimeInterval(resetHours * 3_600))])
@@ -131,7 +135,7 @@ struct CapacityChecks {
         precondition(CapacityForecast.report(accounts: [resetHistory], now: now).ratePerHour == nil,
             "A cross-reset pair must not count as a pace observation")
         let observedReset = CapacityForecast.report(accounts: [resetHistory], now: now).resets.first { !$0.projected }!
-        precondition(observedReset.assumed)
+        precondition(!observedReset.assumed, "A later reading with a new reset window confirms the historical reset")
         close(observedReset.after, 4)
         close(observedReset.date.timeIntervalSince(now), -6_500)
         var stale = tracked
