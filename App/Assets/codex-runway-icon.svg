@@ -1,0 +1,52 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024" fill="none">
+  <title>Codex Runway — three pooled accounts</title>
+  <desc>Vector recreation of concept 13: three softly rounded hexagons, violet above indigo and teal, on a pale glass macOS icon tile. Transparent outer margin preserves the complete rounded tile and shadow.</desc>
+  <defs>
+    <linearGradient id="tile" x1="200" y1="100" x2="852" y2="960" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#FCFDFF"/>
+      <stop offset="0.48" stop-color="#ECF3FF"/>
+      <stop offset="1" stop-color="#D3E0FA"/>
+    </linearGradient>
+    <radialGradient id="glass" cx="0" cy="0" r="1" gradientTransform="translate(752 376) rotate(125) scale(665 780)" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#E3FCFF" stop-opacity="0.7"/>
+      <stop offset="1" stop-color="#FFFFFF" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="rim" x1="280" y1="64" x2="780" y2="928" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#FFFFFF"/>
+      <stop offset="0.55" stop-color="#FFFFFF" stop-opacity="0.7"/>
+      <stop offset="1" stop-color="#ACBDE5" stop-opacity="0.85"/>
+    </linearGradient>
+    <linearGradient id="violet" x1="-90" y1="-145" x2="110" y2="150" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#9877FF"/>
+      <stop offset="0.45" stop-color="#7A55F5"/>
+      <stop offset="1" stop-color="#513CC8"/>
+    </linearGradient>
+    <linearGradient id="indigo" x1="-90" y1="-145" x2="112" y2="145" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#4147D5"/>
+      <stop offset="0.55" stop-color="#323CC2"/>
+      <stop offset="1" stop-color="#233399"/>
+    </linearGradient>
+    <linearGradient id="teal" x1="60" y1="-145" x2="-65" y2="150" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#3DD7D3"/>
+      <stop offset="0.48" stop-color="#19AFBD"/>
+      <stop offset="1" stop-color="#05849F"/>
+    </linearGradient>
+    <filter id="shadow" x="0" y="0" width="1024" height="1024" filterUnits="userSpaceOnUse" color-interpolation-filters="sRGB">
+      <feDropShadow dx="0" dy="20" stdDeviation="15" flood-color="#263D70" flood-opacity="0.18"/>
+      <feDropShadow dx="0" dy="4" stdDeviation="3" flood-color="#7183B7" flood-opacity="0.16"/>
+    </filter>
+    <path id="hexagon" d="M-18-143 Q0-154 18-143 L120-84 Q138-74 138-53 V53 Q138 74 120 84 L18 143 Q0 154-18 143 L-120 84 Q-138 74-138 53 V-53 Q-138-74-120-84 Z"/>
+  </defs>
+  <g id="icon-tile">
+    <rect x="80" y="64" width="864" height="864" rx="190" fill="url(#tile)" filter="url(#shadow)"/>
+    <rect x="80" y="64" width="864" height="864" rx="190" fill="url(#glass)"/>
+    <rect x="82" y="66" width="860" height="860" rx="188" stroke="url(#rim)" stroke-width="4"/>
+    <rect x="89" y="73" width="846" height="846" rx="181" stroke="#FFFFFF" stroke-opacity="0.4" stroke-width="2"/>
+  </g>
+  <g id="account-mark" stroke="#FFFFFF" stroke-opacity="0.55" stroke-width="2.5" stroke-linejoin="round">
+    <use href="#hexagon" transform="translate(512 360)" fill="url(#violet)"/>
+    <use href="#hexagon" transform="translate(356 622)" fill="url(#indigo)"/>
+    <use href="#hexagon" transform="translate(668 622)" fill="url(#teal)"/>
+  </g>
+</svg>
