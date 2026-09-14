@@ -24,11 +24,13 @@ struct ChatGPTAccount: Decodable {
 struct RateLimitSnapshot: Decodable {
     let primary: LimitWindow
     let planType: String?
+    var secondary: LimitWindow? = nil
 }
 
 struct LimitWindow: Decodable {
     let usedPercent: Double
-    let resetsAt: TimeInterval
+    let resetsAt: TimeInterval?
+    var windowDurationMins: Int? = nil
 }
 
 struct ResetCredits: Decodable {
@@ -90,10 +92,9 @@ actor CodexAppServerClient {
         process.arguments = ["app-server", "--stdio"]
         let input = Pipe()
         let output = Pipe()
-        let errors = Pipe()
         process.standardInput = input
         process.standardOutput = output
-        process.standardError = errors
+        process.standardError = FileHandle.nullDevice
 
         output.fileHandleForReading.readabilityHandler = { [weak self] handle in
             let data = handle.availableData
@@ -128,6 +129,14 @@ actor CodexAppServerClient {
         let data = try JSONSerialization.data(withJSONObject: object)
         guard let stdin else { throw CodexAppServerError.server("Codex App Server did not start.") }
 
+        // A stalled server must not block every future automatic refresh.
+        let timeout = Task {
+            try await Task.sleep(for: .seconds(30))
+            pending.removeValue(forKey: id)?.resume(
+                throwing: CodexAppServerError.server("Codex refresh timed out. It will retry automatically.")
+            )
+        }
+        defer { timeout.cancel() }
         return try await withCheckedThrowingContinuation { continuation in
             pending[id] = continuation
             stdin.write(data)
