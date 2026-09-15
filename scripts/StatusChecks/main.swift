@@ -114,6 +114,12 @@ struct StatusChecks {
         fixture.shouldFail = false
         await store.refreshActiveAccount()
         precondition(store.refreshError == nil && store.activeAccountID == store.accounts[1].id)
+        fixture.shouldFail = true
+        let quietRefreshSucceeded = await store.refreshActiveAccount(presentFailure: false)
+        precondition(!quietRefreshSucceeded && store.refreshError == nil,
+            "A transient launch refresh failure must stay quiet when saved account data is available")
+        fixture.shouldFail = false
+        await store.refreshActiveAccount()
         let reloaded = RunwayStore(defaults: defaults)
         precondition(reloaded.accounts == store.accounts, "All account snapshots must persist")
         let beforeMove = store.accounts

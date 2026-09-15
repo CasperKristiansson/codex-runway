@@ -1,21 +1,19 @@
+import AppKit
 import SwiftUI
 
 @main
-struct CodexRunwayApp: App {
-    @NSApplicationDelegateAdaptor(RunwayAppDelegate.self) private var appDelegate
-
-    var body: some Scene {
-        Settings {
-            SettingsView()
-                .environmentObject(appDelegate.store)
-        }
-    }
-}
-
 @MainActor
-final class RunwayAppDelegate: NSObject, NSApplicationDelegate {
-    let store = RunwayStore()
+final class CodexRunwayApp: NSObject, NSApplicationDelegate {
+    private let store = RunwayStore()
     private var menuController: StatusPanelController?
+
+    static func main() {
+        let app = NSApplication.shared
+        let delegate = CodexRunwayApp()
+        app.delegate = delegate
+        app.setActivationPolicy(.accessory)
+        app.run()
+    }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         menuController = StatusPanelController(store: store)
@@ -30,6 +28,7 @@ final class RunwayAppDelegate: NSObject, NSApplicationDelegate {
 struct MenuBarView: View {
     @EnvironmentObject private var store: RunwayStore
     let openSettings: () -> Void
+    let openAccountHistory: (UUID) -> Void
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -114,7 +113,12 @@ struct MenuBarView: View {
     private func accountList(_ accounts: [CodexAccount]) -> some View {
         VStack(spacing: 8) {
             ForEach(accounts) { account in
-                AccountCard(account: account, isActive: account.id == store.activeAccountID)
+                Button { openAccountHistory(account.id) } label: {
+                    AccountCard(account: account, isActive: account.id == store.activeAccountID)
+                }
+                .buttonStyle(.plain)
+                .help("Open \(account.name) history")
+                .accessibilityLabel("Open \(account.name) history")
             }
         }
         .fixedSize(horizontal: false, vertical: true)

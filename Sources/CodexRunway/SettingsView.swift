@@ -1,18 +1,35 @@
 import SwiftUI
 
-private final class SettingsTabState: ObservableObject {
+@MainActor
+final class SettingsNavigationState: ObservableObject {
     @Published var tab = 0
+    @Published var selectedAccountID: UUID? {
+        didSet {
+            if let selectedAccountID {
+                UserDefaults.standard.set(selectedAccountID.uuidString, forKey: "codex-runway.selected-account.v1")
+            }
+        }
+    }
+
+    init() {
+        selectedAccountID = UserDefaults.standard.string(forKey: "codex-runway.selected-account.v1").flatMap(UUID.init(uuidString:))
+    }
+
+    func showProfile(for accountID: UUID) {
+        selectedAccountID = accountID
+        tab = 1
+    }
 }
 
 struct SettingsView: View {
     @EnvironmentObject private var store: RunwayStore
-    @StateObject private var state = SettingsTabState()
+    @ObservedObject var navigation: SettingsNavigationState
 
     var body: some View {
         VStack(spacing: 0) {
-            Picker("Panel", selection: $state.tab) {
+            Picker("Panel", selection: $navigation.tab) {
                 Text("Settings").tag(0)
-                Text("Profile").tag(1)
+                Text("History").tag(1)
             }
             .pickerStyle(.segmented)
             .labelsHidden()
@@ -20,7 +37,7 @@ struct SettingsView: View {
             .padding(.top, 20)
             .padding(.bottom, 16)
             Divider()
-            if state.tab == 0 { accountSettings } else { ProfileView() }
+            if navigation.tab == 0 { accountSettings } else { ProfileView(selection: $navigation.selectedAccountID) }
         }
         .frame(width: 840, height: 620)
         .background(Color.white)

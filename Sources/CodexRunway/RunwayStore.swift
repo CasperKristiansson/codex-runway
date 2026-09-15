@@ -46,7 +46,15 @@ final class RunwayStore: ObservableObject {
         ) { [weak self] _ in
             Task { @MainActor [weak self] in await self?.refreshActiveAccount() }
         }
-        Task { [weak self] in await self?.refreshActiveAccount() }
+        Task { [weak self] in
+            guard let self else { return }
+            let hasSavedAccounts = !self.accounts.isEmpty
+            let succeeded = await self.refreshActiveAccount(presentFailure: !hasSavedAccounts)
+            if !succeeded {
+                try? await Task.sleep(for: .seconds(10))
+                _ = await self.refreshActiveAccount(presentFailure: !hasSavedAccounts)
+            }
+        }
     }
 
     func stopAutomaticRefresh() {
@@ -110,8 +118,9 @@ final class RunwayStore: ObservableObject {
 
     /// Refreshes whichever account is currently signed in to Codex. Accounts are
     /// discovered by stable account ID and email, never by their plan tier.
-    func refreshActiveAccount(forceProfile: Bool = false) async {
-        guard !isRefreshing else { return }
+    @discardableResult
+    func refreshActiveAccount(forceProfile: Bool = false, presentFailure: Bool = true) async -> Bool {
+        guard !isRefreshing else { return false }
         isRefreshing = true
         refreshError = nil
         defer { isRefreshing = false }
@@ -153,9 +162,11 @@ final class RunwayStore: ObservableObject {
             activeAccountID = accounts[index].id
             save()
             await refreshProfileIfNeeded(accountID: accounts[index].id, force: forceProfile)
+            return true
         } catch {
             activeAccountID = nil
-            refreshError = error.localizedDescription
+            if presentFailure { refreshError = error.localizedDescription }
+            return false
         }
     }
 

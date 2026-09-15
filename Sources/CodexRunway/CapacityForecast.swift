@@ -52,8 +52,7 @@ enum CapacityForecast {
               date >= first.date, date <= last.date,
               let lower = points.last(where: { $0.date <= date }) else { return nil }
         guard lower.date != date,
-              let upper = points.first(where: { $0.date > date }),
-              lower.segment == upper.segment else { return lower.date == date ? lower.units : nil }
+              let upper = points.first(where: { $0.date > date }) else { return lower.units }
         let fraction = date.timeIntervalSince(lower.date) / upper.date.timeIntervalSince(lower.date)
         return lower.units + (upper.units - lower.units) * fraction
     }
@@ -67,6 +66,9 @@ enum CapacityForecast {
     static func remaining(_ snapshot: UsageSnapshot, weight: Double) -> Double {
         weight * (1 - min(100, max(0, snapshot.usedPercent)) / 100)
     }
+
+    // One Pro 20× allowance is four internal units and defines 100%.
+    static func percentage(forUnits units: Double) -> Double { units * 25 }
 
     static func report(accounts: [CodexAccount], now: Date = .now) -> CapacityReport {
         let accounts = accounts.filter(\.isEnabled)

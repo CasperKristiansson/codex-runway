@@ -14,6 +14,7 @@ final class StatusPanelController: NSObject, NSWindowDelegate {
     private var hostingView: NSHostingView<AnyView>?
     private var contentMaximumHeight: CGFloat?
     private var settingsWindow: NSWindow?
+    private let settingsNavigation = SettingsNavigationState()
     private var localMonitor: Any?
     private var globalMonitor: Any?
     private var storeSubscription: AnyCancellable?
@@ -99,7 +100,10 @@ final class StatusPanelController: NSObject, NSWindowDelegate {
     private func panelContent(maximumHeight: CGFloat) -> AnyView {
         AnyView(
             FittingMenuPanel(maximumHeight: maximumHeight,
-                content: AnyView(MenuBarView(openSettings: { [weak self] in self?.showSettings() }).environmentObject(store)))
+                content: AnyView(MenuBarView(
+                    openSettings: { [weak self] in self?.showSettings() },
+                    openAccountHistory: { [weak self] accountID in self?.showAccountHistory(accountID) }
+                ).environmentObject(store)))
         )
     }
 
@@ -124,7 +128,7 @@ final class StatusPanelController: NSObject, NSWindowDelegate {
             )
             window.title = "Codex Runway Settings"
             window.isReleasedWhenClosed = false
-            let hosting = NSHostingView(rootView: SettingsView().environmentObject(store))
+            let hosting = NSHostingView(rootView: SettingsView(navigation: settingsNavigation).environmentObject(store))
             window.contentView = hosting
             window.setContentSize(hosting.fittingSize)
             window.center()
@@ -132,6 +136,11 @@ final class StatusPanelController: NSObject, NSWindowDelegate {
         }
         NSApp.activate(ignoringOtherApps: true)
         settingsWindow?.makeKeyAndOrderFront(nil)
+    }
+
+    private func showAccountHistory(_ accountID: UUID) {
+        settingsNavigation.showProfile(for: accountID)
+        showSettings()
     }
 }
 

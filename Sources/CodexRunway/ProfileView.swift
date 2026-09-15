@@ -1,14 +1,13 @@
 import SwiftUI
 
 private final class ProfileViewState: ObservableObject {
-    @Published var selection: UUID?
     @Published var mode = ProfileHeatmap.Mode.daily
 }
 
 struct ProfileView: View {
     @EnvironmentObject private var store: RunwayStore
     @StateObject private var state = ProfileViewState()
-    private var selection: UUID? { state.selection }
+    @Binding var selection: UUID?
     private var mode: ProfileHeatmap.Mode { state.mode }
 
     private var selectedAccount: CodexAccount? { store.accounts.first { $0.id == selection } }
@@ -22,7 +21,7 @@ struct ProfileView: View {
         ScrollView {
             VStack(spacing: 0) {
                 HStack {
-                    Picker("Account", selection: $state.selection) {
+                    Picker("Account", selection: $selection) {
                         Text("All active accounts").tag(nil as UUID?)
                         ForEach(store.accounts) { account in
                             Text(account.name + (account.isEnabled ? "" : " · Inactive")).tag(Optional(account.id))

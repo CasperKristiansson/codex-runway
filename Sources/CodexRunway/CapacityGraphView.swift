@@ -6,20 +6,24 @@ private final class CapacityGraphSelection: ObservableObject {
     @Published var range: CapacityGraphRange {
         didSet { UserDefaults.standard.set(range.rawValue, forKey: "codex-runway.graph-range.v1") }
     }
+    @Published var showsPercent: Bool {
+        didSet { UserDefaults.standard.set(showsPercent, forKey: "codex-runway.graph-percent.v1") }
+    }
 
     init() {
         range = CapacityGraphRange(rawValue: UserDefaults.standard.string(forKey: "codex-runway.graph-range.v1") ?? "") ?? .overview
+        showsPercent = UserDefaults.standard.bool(forKey: "codex-runway.graph-percent.v1")
     }
 }
 
 private enum CapacityGraphRange: String, CaseIterable, Identifiable {
-    case overview, hour, sixHours, day, week
+    case overview, hour, sixHours, day, threeDays, week
     var id: String { rawValue }
     var label: String {
-        switch self { case .overview: "Overview"; case .hour: "1h"; case .sixHours: "6h"; case .day: "1d"; case .week: "7d" }
+        switch self { case .overview: "Overview"; case .hour: "1h"; case .sixHours: "6h"; case .day: "1d"; case .threeDays: "3d"; case .week: "7d" }
     }
     var lookback: TimeInterval? {
-        switch self { case .overview: nil; case .hour: 3_600; case .sixHours: 21_600; case .day: 86_400; case .week: 7 * 86_400 }
+        switch self { case .overview: nil; case .hour: 3_600; case .sixHours: 21_600; case .day: 86_400; case .threeDays: 3 * 86_400; case .week: 7 * 86_400 }
     }
 }
 
@@ -33,6 +37,33 @@ struct CapacityGraphView: View {
             VStack(alignment: .leading, spacing: 8) {
                 HStack {
                     Text("Combined runway").font(.subheadline.weight(.semibold))
+                    Spacer()
+                    if report.hasBalance {
+                        Text(balanceLabel(report))
+                            .font(.subheadline.weight(.semibold))
+                    } else if report.total > 0 {
+                        Text(emptyBalanceLabel(report)).font(.subheadline)
+                    }
+                }
+                summary(report, showsPercent: selection.showsPercent)
+                    .font(.caption)
+                    .fixedSize(horizontal: false, vertical: true)
+                if report.hasAssumedResets {
+                    Text("Includes assumed resets · next dates unknown until synced")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+                HStack(spacing: 6) {
+                    if report.issue == nil, let rate = report.ratePerHour {
+                        Text("\(paceLabel(rate * 24, percent: selection.showsPercent)) · \(averageLabel(report))")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                            .fixedSize()
+                    }
+                    Spacer()
+                    Text("Range")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
                     Picker("Graph range", selection: $selection.range) {
                         ForEach(CapacityGraphRange.allCases) { range in Text(range.label).tag(range) }
                     }
@@ -41,26 +72,20 @@ struct CapacityGraphView: View {
                     .controlSize(.small)
                     .fixedSize()
                     .onChange(of: selection.range) { _, _ in selection.date = nil }
-                    Spacer()
-                    if report.hasBalance {
-                        Text("\(report.remaining, specifier: "%.1f") / \(report.total, specifier: "%.0f") units")
-                            .font(.subheadline.weight(.semibold))
-                    } else if report.total > 0 {
-                        Text("— / \(report.total, specifier: "%.0f") units").font(.subheadline)
-                    }
-                }
-                if selection.range == .overview {
-                    summary(report)
+                    Divider().frame(height: 15)
+                    Text("Units")
                         .font(.caption)
-                        .fixedSize(horizontal: false, vertical: true)
-                    if report.hasAssumedResets {
-                        Text("Includes assumed resets · next dates unknown until synced")
-                            .font(.caption).foregroundStyle(.secondary)
-                    }
-                } else {
-                    Text("Past \(selection.range.label) · history only")
-                        .font(.caption).foregroundStyle(.secondary)
+                        .foregroundStyle(selection.showsPercent ? .secondary : .primary)
+                    Toggle("Percentage scale", isOn: $selection.showsPercent)
+                        .labelsHidden()
+                        .toggleStyle(.switch)
+                        .controlSize(.mini)
+                        .fixedSize()
+                    Text("%")
+                        .font(.caption)
+                        .foregroundStyle(selection.showsPercent ? .primary : .secondary)
                 }
+                .help("Capacity scale: Pro 20× equals 100%, and Pro 5× equals 25%")
                 if report.total > 0 {
                     graph(report, range: selection.range, now: context.date)
                         .frame(height: 100)
@@ -72,23 +97,19 @@ struct CapacityGraphView: View {
     }
 
     @ViewBuilder
-    private func summary(_ report: CapacityReport) -> some View {
+    private func summary(_ report: CapacityReport, showsPercent: Bool) -> some View {
         if let issue = report.issue {
             Text(issue).foregroundStyle(.secondary)
         } else if let projection = report.projection, let rate = report.ratePerHour {
-            VStack(alignment: .leading, spacing: 3) {
-                if rate == 0 {
-                    Text("No usage observed · estimated balance stays flat")
-                        .foregroundStyle(.secondary)
-                } else if let exhaustion = projection.exhaustedAt {
-                    Text("May run out \(exhaustion.formatted(.dateTime.month(.abbreviated).day().hour().minute())) · slow down ~\(Int((report.reductionPercent ?? 0).rounded(.up)))%")
-                        .foregroundStyle(Color(red: 0.55, green: 0.20, blue: 0.06))
-                } else {
-                    Text("\(report.hasAssumedResets ? "Estimated runway" : "Pace fits the next resets") · lowest balance \(projection.minimum, specifier: "%.1f") units")
-                        .foregroundStyle(.indigo)
-                }
-                Text("\(rate * 24, specifier: "%.2f") units/day · \(averageLabel(report))")
+            if rate == 0 {
+                Text("No usage observed · estimated balance stays flat")
                     .foregroundStyle(.secondary)
+            } else if let exhaustion = projection.exhaustedAt {
+                Text("May run out \(exhaustion.formatted(.dateTime.month(.abbreviated).day().hour().minute())) · slow down ~\(Int((report.reductionPercent ?? 0).rounded(.up)))%")
+                    .foregroundStyle(Color(red: 0.55, green: 0.20, blue: 0.06))
+            } else {
+                Text("\(report.hasAssumedResets ? "Estimated runway" : "Pace fits the next resets") · lowest balance \(capacityLabel(projection.minimum, percent: showsPercent, decimals: showsPercent ? 0 : 1))")
+                    .foregroundStyle(.indigo)
             }
         }
     }
@@ -120,7 +141,7 @@ struct CapacityGraphView: View {
                     .foregroundStyle(Color.indigo.opacity(0.045))
             }
             ForEach(history) { point in
-                LineMark(x: .value("Date", point.date), y: .value("Units", point.units), series: .value("Series", "history-\(point.segment)"))
+                LineMark(x: .value("Date", point.date), y: .value("Units", point.units), series: .value("Series", "history"))
                     .foregroundStyle(.indigo)
                     .interpolationMethod(.linear)
                     .lineStyle(StrokeStyle(lineWidth: 1.8))
@@ -183,7 +204,7 @@ struct CapacityGraphView: View {
                 AxisGridLine().foregroundStyle(.gray.opacity(0.15))
                 AxisValueLabel {
                     if let units = value.as(Double.self) {
-                        Text(units, format: .number.precision(.fractionLength(0...1)))
+                        Text(axisCapacityLabel(units, percent: selection.showsPercent))
                             .font(.system(size: 9))
                     }
                 }
@@ -227,7 +248,7 @@ struct CapacityGraphView: View {
                     .font(.system(size: 10)).padding(.horizontal, 7).padding(.vertical, 5)
                     .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 8)).allowsHitTesting(false)
                 } else if let value = CapacityForecast.value(at: date, in: points) {
-                    Text("\(date.formatted(.dateTime.day().month(.abbreviated).hour().minute())) · \(value, specifier: "%.1f") units")
+                    Text("\(date.formatted(.dateTime.day().month(.abbreviated).hour().minute())) · \(capacityLabel(value, percent: selection.showsPercent, decimals: 1))")
                     .font(.system(size: 10))
                     .padding(.horizontal, 6)
                     .padding(.vertical, 4)
@@ -257,8 +278,32 @@ struct CapacityGraphView: View {
 
     private func axisLabel(_ date: Date, range: CapacityGraphRange, now: Date) -> String {
         if range == .overview { return abs(date.timeIntervalSince(now)) < 1 ? "Today" : date.formatted(.dateTime.day().month(.abbreviated)) }
-        if range == .week { return date.formatted(.dateTime.weekday(.abbreviated)) }
+        if range == .threeDays || range == .week { return date.formatted(.dateTime.weekday(.abbreviated)) }
         return date.formatted(.dateTime.hour().minute())
+    }
+
+    private func balanceLabel(_ report: CapacityReport) -> String {
+        if selection.showsPercent {
+            return String(format: "%.0f%% / %.0f%%", CapacityForecast.percentage(forUnits: report.remaining), CapacityForecast.percentage(forUnits: report.total))
+        }
+        return String(format: "%.1f / %.0f units", report.remaining, report.total)
+    }
+
+    private func emptyBalanceLabel(_ report: CapacityReport) -> String {
+        selection.showsPercent ? String(format: "— / %.0f%%", CapacityForecast.percentage(forUnits: report.total)) : String(format: "— / %.0f units", report.total)
+    }
+
+    private func capacityLabel(_ units: Double, percent: Bool, decimals: Int) -> String {
+        if percent { return String(format: decimals == 0 ? "%.0f%%" : "%.1f%%", CapacityForecast.percentage(forUnits: units)) }
+        return String(format: decimals == 1 ? "%.1f units" : "%.0f units", units)
+    }
+
+    private func paceLabel(_ unitsPerDay: Double, percent: Bool) -> String {
+        percent ? String(format: "%.1f%%/day", CapacityForecast.percentage(forUnits: unitsPerDay)) : String(format: "%.2f units/day", unitsPerDay)
+    }
+
+    private func axisCapacityLabel(_ units: Double, percent: Bool) -> String {
+        percent ? String(format: "%.0f%%", CapacityForecast.percentage(forUnits: units)) : String(format: "%.1f", units)
     }
 
 }

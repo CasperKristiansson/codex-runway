@@ -18,8 +18,10 @@ struct CapacityChecks {
         precondition(CapacityForecast.value(at: now, in: []) == nil)
         let gapPoints = [CapacityPoint(date: now, units: 4, segment: 0),
                          CapacityPoint(date: now.addingTimeInterval(100), units: 3, segment: 1)]
-        precondition(CapacityForecast.value(at: now.addingTimeInterval(50), in: gapPoints) == nil,
-            "Hover must not interpolate across an unobserved gap")
+        close(CapacityForecast.value(at: now.addingTimeInterval(50), in: gapPoints)!, 3.5)
+        close(CapacityForecast.percentage(forUnits: 4), 100)
+        close(CapacityForecast.percentage(forUnits: 1), 25)
+        close(CapacityForecast.percentage(forUnits: 9), 225)
         func account(_ name: String, plan: String = "Pro 20×", used: Double, resetHours: Double) -> CodexAccount {
             CodexAccount(name: name, planName: plan, snapshots: [UsageSnapshot(capturedAt: now,
                 usedPercent: used, resetAt: now.addingTimeInterval(resetHours * 3_600))])
