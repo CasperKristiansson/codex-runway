@@ -1,5 +1,4 @@
 import AppKit
-import Combine
 import SwiftUI
 
 /// Own the window shape rather than inheriting MenuBarExtra's private frame.
@@ -20,7 +19,6 @@ final class StatusPanelController: NSObject, NSWindowDelegate {
     private let settingsNavigation = SettingsNavigationState()
     private var localMonitor: Any?
     private var globalMonitor: Any?
-    private var storeSubscription: AnyCancellable?
 
     init(store: RunwayStore) {
         self.store = store
@@ -48,13 +46,6 @@ final class StatusPanelController: NSObject, NSWindowDelegate {
         hosting.sizingOptions = [.intrinsicContentSize]
         hostingView = hosting
         panel.contentView = hosting
-        storeSubscription = store.objectWillChange.sink { [weak self] _ in
-            // Published changes arrive before the stored value is updated.
-            DispatchQueue.main.async {
-                guard let self, self.panel.isVisible else { return }
-                self.sizeAndPositionPanel()
-            }
-        }
     }
 
     @objc private func togglePanel() {
