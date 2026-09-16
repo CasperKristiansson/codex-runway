@@ -5,6 +5,8 @@ import SwiftUI
 /// Own the window shape rather than inheriting MenuBarExtra's private frame.
 @MainActor
 final class StatusPanelController: NSObject, NSWindowDelegate {
+    private static let panelWidth: CGFloat = 420
+    private static let minimumUsableHeight: CGFloat = 120
     private let store: RunwayStore
     private let statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
     private let panel = AccountStatusPanel(
@@ -13,6 +15,7 @@ final class StatusPanelController: NSObject, NSWindowDelegate {
     )
     private var hostingView: NSHostingView<AnyView>?
     private var contentMaximumHeight: CGFloat?
+    private var lastValidPanelHeight: CGFloat?
     private var settingsWindow: NSWindow?
     private let settingsNavigation = SettingsNavigationState()
     private var localMonitor: Any?
@@ -78,7 +81,10 @@ final class StatusPanelController: NSObject, NSWindowDelegate {
     private func sizeAndPositionPanel() {
         guard let hostingView, let button = statusItem.button, let buttonWindow = button.window else { return }
         let anchor = buttonWindow.convertToScreen(button.convert(button.bounds, to: nil))
-        let screen = buttonWindow.screen?.visibleFrame ?? anchor
+        let screen = buttonWindow.screen?.visibleFrame
+            ?? NSScreen.screens.first(where: { $0.frame.contains(NSPoint(x: anchor.midX, y: anchor.midY)) })?.visibleFrame
+            ?? NSScreen.main?.visibleFrame
+            ?? NSRect(x: anchor.midX - Self.panelWidth, y: 0, width: Self.panelWidth, height: 800)
         let maximumHeight = max(200, anchor.minY - screen.minY - 12)
         // Account updates already reach the existing root via EnvironmentObject.
         // Replacing it during a drop restarts layout while AppKit is measuring it.
@@ -88,9 +94,21 @@ final class StatusPanelController: NSObject, NSWindowDelegate {
         }
         hostingView.invalidateIntrinsicContentSize()
         hostingView.layoutSubtreeIfNeeded()
-        let size = hostingView.fittingSize
-        let x = max(screen.minX + 6, min(anchor.midX - size.width / 2, screen.maxX - size.width - 6))
-        let frame = NSRect(x: x, y: anchor.minY - size.height - 5, width: size.width, height: size.height)
+        let measuredHeight = hostingView.fittingSize.height
+        let height: CGFloat
+        if measuredHeight.isFinite, measuredHeight >= Self.minimumUsableHeight {
+            height = min(measuredHeight, maximumHeight)
+            lastValidPanelHeight = height
+        } else {
+            // SwiftUI can briefly report a zero intrinsic size while published
+            // refresh state is replacing the button label and graph values.
+            // Retain the last usable height instead of moving a tiny panel to
+            // the status item where its content is clipped off-screen.
+            height = min(lastValidPanelHeight ?? max(panel.frame.height, Self.minimumUsableHeight), maximumHeight)
+        }
+        let width = min(Self.panelWidth, max(1, screen.width - 12))
+        let x = max(screen.minX + 6, min(anchor.midX - width / 2, screen.maxX - width - 6))
+        let frame = NSRect(x: x, y: anchor.minY - height - 5, width: width, height: height)
         if panel.frame != frame {
             panel.setFrame(frame, display: panel.isVisible)
             panel.invalidateShadow()

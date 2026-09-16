@@ -84,6 +84,7 @@ struct MenuBarView: View {
                     Task { await store.refreshActiveAccount() }
                 } label: {
                     Label(store.isRefreshing ? "Refreshing…" : "Refresh", systemImage: "arrow.clockwise")
+                        .frame(width: 92, alignment: .leading)
                 }
                 .buttonStyle(FooterButtonStyle(prominent: true))
                 .disabled(store.isRefreshing)
