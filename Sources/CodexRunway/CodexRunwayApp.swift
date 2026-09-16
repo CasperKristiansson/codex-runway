@@ -83,8 +83,14 @@ struct MenuBarView: View {
                 Button {
                     Task { await store.refreshActiveAccount() }
                 } label: {
-                    Label(store.isRefreshing ? "Refreshing…" : "Refresh", systemImage: "arrow.clockwise")
-                        .frame(width: 92, alignment: .leading)
+                    Label("Refresh", systemImage: "arrow.clockwise")
+                        .opacity(store.isRefreshing ? 0 : 1)
+                        .overlay {
+                            if store.isRefreshing {
+                                ProgressView()
+                                    .controlSize(.small)
+                            }
+                        }
                 }
                 .buttonStyle(FooterButtonStyle(prominent: true))
                 .disabled(store.isRefreshing)
