@@ -105,7 +105,7 @@ struct CapacityGraphView: View {
                 Text("No usage observed · estimated balance stays flat")
                     .foregroundStyle(.secondary)
             } else if let exhaustion = projection.exhaustedAt {
-                Text("May run out \(exhaustion.formatted(.dateTime.month(.abbreviated).day().hour().minute())) · slow down ~\(Int((report.reductionPercent ?? 0).rounded(.up)))%")
+                Text(exhaustionWarning(exhaustion, projection: projection, showsPercent: showsPercent))
                     .foregroundStyle(Color(red: 0.55, green: 0.20, blue: 0.06))
             } else {
                 Text("\(report.hasAssumedResets ? "Estimated runway" : "Pace fits the next resets") · lowest balance \(capacityLabel(projection.minimum, percent: showsPercent, decimals: showsPercent ? 0 : 1))")
@@ -119,6 +119,28 @@ struct CapacityGraphView: View {
         if hours >= 719 { return "30-day average" }
         let history = hours >= 24 ? String(format: "%.1fd", hours / 24) : String(format: "%.0fh", hours)
         return "\(history) average"
+    }
+
+    private func exhaustionWarning(_ exhaustion: Date, projection: CapacitySimulation, showsPercent: Bool) -> String {
+        let date = exhaustion.formatted(.dateTime.month(.abbreviated).day().hour().minute())
+        let early = projection.shortfallAt.map { " (\(durationLabel($0.timeIntervalSince(exhaustion))) early)" } ?? ""
+        guard let shortfall = projection.shortfallUnits else { return "May run out \(date)\(early)" }
+        return "May run out \(date)\(early) · projected \(deficitLabel(shortfall, percent: showsPercent))"
+    }
+
+    private func durationLabel(_ interval: TimeInterval) -> String {
+        let totalHours = max(0, Int((interval / 3_600).rounded()))
+        let days = totalHours / 24
+        let hours = totalHours % 24
+        if days > 0, hours > 0 { return "\(days)d \(hours)h" }
+        if days > 0 { return "\(days)d" }
+        return "\(hours)h"
+    }
+
+    private func deficitLabel(_ units: Double, percent: Bool) -> String {
+        percent
+            ? String(format: "−%.0f%% at reset", CapacityForecast.percentage(forUnits: units))
+            : String(format: "−%.1f units at reset", units)
     }
 
     private func graph(_ report: CapacityReport, range: CapacityGraphRange, now: Date) -> some View {

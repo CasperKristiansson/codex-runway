@@ -23,6 +23,8 @@ struct CapacitySimulation {
     var resets: [CapacityReset] = []
     var minimum: Double = .infinity
     var exhaustedAt: Date?
+    var shortfallUnits: Double?
+    var shortfallAt: Date?
 }
 
 struct CapacityReport {
@@ -34,7 +36,6 @@ struct CapacityReport {
     var projection: CapacitySimulation?
     var ratePerHour: Double?
     var averageHistoryHours: Double?
-    var reductionPercent: Double?
     var horizon: Date
     var issue: String?
     var hasStaleReadings = false
@@ -208,16 +209,6 @@ enum CapacityForecast {
         result.projection = projection
         result.resets.removeAll { !$0.hasEstimate }
         result.resets += projection.resets
-        if projection.exhaustedAt != nil {
-            var low = 0.0, high = rate
-            for _ in 0..<40 {
-                let middle = (low + high) / 2
-                if simulate(accounts: accounts, snapshots: latest, ratePerHour: middle, now: now).exhaustedAt == nil {
-                    low = middle
-                } else { high = middle }
-            }
-            result.reductionPercent = min(100, max(0, (1 - low / rate) * 100))
-        }
         return result
     }
 
@@ -236,6 +227,8 @@ enum CapacityForecast {
             if ratePerHour > 0 && ratePerHour * 48 > total {
                 let exhaustion = now.addingTimeInterval(total / ratePerHour * 3_600)
                 result.exhaustedAt = exhaustion
+                result.shortfallUnits = ratePerHour * 48 - total
+                result.shortfallAt = horizon
                 result.points.append(CapacityPoint(date: exhaustion, units: 0, segment: 0))
             }
             result.minimum = max(0, total - ratePerHour * 48)
@@ -248,7 +241,11 @@ enum CapacityForecast {
             var demand = ratePerHour * hours
             if demand > total + 0.000000001 && ratePerHour > 0 {
                 let exhaustion = date.addingTimeInterval(total / ratePerHour * 3_600)
-                if result.exhaustedAt == nil { result.exhaustedAt = exhaustion }
+                if result.exhaustedAt == nil {
+                    result.exhaustedAt = exhaustion
+                    result.shortfallUnits = demand - total
+                    result.shortfallAt = resetAt
+                }
                 result.points.append(CapacityPoint(date: exhaustion, units: 0, segment: 0))
             }
             // Spend the soonest-resetting allowance first, preserving accounts

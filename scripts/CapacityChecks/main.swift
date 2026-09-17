@@ -53,6 +53,8 @@ struct CapacityChecks {
         let fails = CapacityForecast.simulate(accounts: accounts, snapshots: snapshots, ratePerHour: 2, now: now)
         close(fails.exhaustedAt!.timeIntervalSince(now), 2.5 * 3_600)
         close(fails.minimum, 0)
+        close(fails.shortfallUnits!, 3)
+        close(fails.shortfallAt!.timeIntervalSince(fails.exhaustedAt!), 1.5 * 3_600)
         let single = [account("A", used: 75, resetHours: 1)]
         let noBurn = CapacityForecast.simulate(accounts: single, snapshots: single.map { $0.latestSnapshot! }, ratePerHour: 0, now: now)
         close(noBurn.resets[0].before, 1)
@@ -72,7 +74,8 @@ struct CapacityChecks {
         let paced = CapacityForecast.report(accounts: [tracked], now: now)
         close(paced.ratePerHour!, 0.8)
         precondition(paced.projection!.exhaustedAt != nil)
-        close(paced.reductionPercent!, 70)
+        close(paced.projection!.shortfallUnits!, 5.6)
+        close(paced.projection!.shortfallAt!.timeIntervalSince(paced.projection!.exhaustedAt!), 7 * 3_600)
         let duplicates = CapacityForecast.report(accounts: [tracked, tracked], now: now)
         close(duplicates.ratePerHour!, 1.6) // Concurrent consumption is still added.
 
@@ -173,6 +176,8 @@ struct CapacityChecks {
         let allUnknown = CapacityForecast.simulate(accounts: [overdue], snapshots: [overdue.latestSnapshot!], ratePerHour: 0.1, now: now)
         precondition(allUnknown.resets.isEmpty && allUnknown.exhaustedAt != nil)
         close(allUnknown.exhaustedAt!.timeIntervalSince(now), 40 * 3_600)
+        close(allUnknown.shortfallUnits!, 0.8)
+        precondition(allUnknown.shortfallAt == now.addingTimeInterval(2 * 86_400))
         precondition(allUnknown.points.last!.date == now.addingTimeInterval(2 * 86_400))
         let muchLater = CapacityForecast.report(accounts: [overdue], now: now.addingTimeInterval(20 * 86_400))
         close(muchLater.remaining, 4)
