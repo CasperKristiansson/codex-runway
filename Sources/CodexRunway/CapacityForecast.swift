@@ -113,17 +113,23 @@ enum CapacityForecast {
                 let weight = pair.value.capacityUnits ?? accounts[pair.key].capacityUnits!
                 return sum + (assumedAccounts.contains(pair.key) ? weight : remaining(pair.value, weight: weight))
             }
-            let wasComplete = known.count == accounts.count
+            let hadKnownAccounts = !known.isEmpty
+            let wasKnown = previous != nil
             known[event.index] = event.snapshot
             if event.reset { assumedAccounts.insert(event.index) }
             else { assumedAccounts.remove(event.index) }
-            guard known.count == accounts.count else { continue }
             let after = known.reduce(0.0) { sum, pair in
                 let weight = pair.value.capacityUnits ?? accounts[pair.key].capacityUnits!
                 return sum + (assumedAccounts.contains(pair.key) ? weight : remaining(pair.value, weight: weight))
             }
             if let last = result.history.last, date.timeIntervalSince(last.date) > 3_600 { segment += 1 }
-            if reset && wasComplete {
+            // A newly discovered account joins the observed pool at its first
+            // real reading. Keep earlier history from already known accounts,
+            // and show the added balance as a truthful step at discovery time.
+            if !wasKnown && hadKnownAccounts {
+                result.history.append(CapacityPoint(date: date, units: before, segment: segment))
+            }
+            if reset && wasKnown {
                 result.history.append(CapacityPoint(date: date, units: before, segment: segment))
                 result.resets.append(CapacityReset(date: date, accountName: accounts[event.index].name,
                     before: before, after: after, projected: false, assumed: event.assumed))

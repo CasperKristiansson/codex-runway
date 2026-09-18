@@ -79,6 +79,20 @@ struct CapacityChecks {
         let duplicates = CapacityForecast.report(accounts: [tracked, tracked], now: now)
         close(duplicates.ratePerHour!, 1.6) // Concurrent consumption is still added.
 
+        // Adding a newly discovered account must not hide the established
+        // account's earlier history. Its balance joins only at the first real
+        // observation, without being fabricated into earlier points.
+        var newcomer = account("New", used: 25, resetHours: 12)
+        let joinedAt = now.addingTimeInterval(-450)
+        newcomer.snapshots = [UsageSnapshot(capturedAt: joinedAt, usedPercent: 25,
+            resetAt: now.addingTimeInterval(12 * 3_600))]
+        let joined = CapacityForecast.report(accounts: [tracked, newcomer], now: now)
+        precondition(joined.history.first!.date == tracked.snapshots.first!.capturedAt)
+        let joiningPoints = joined.history.filter { $0.date == joinedAt }
+        precondition(joiningPoints.count == 2)
+        close(joiningPoints.last!.units - joiningPoints.first!.units, 3)
+        precondition(joined.issue!.contains("Learning"))
+
         // Switching accounts must not extrapolate each short session to a full day.
         var morning = tracked
         morning.snapshots = [
