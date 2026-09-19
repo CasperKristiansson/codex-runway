@@ -22,6 +22,37 @@ struct CapacityChecks {
         close(CapacityForecast.percentage(forUnits: 4), 100)
         close(CapacityForecast.percentage(forUnits: 1), 25)
         close(CapacityForecast.percentage(forUnits: 9), 225)
+        let intervalPoints = [CapacityPoint(date: now.addingTimeInterval(-3_600), units: 4, segment: 0),
+                              CapacityPoint(date: now.addingTimeInterval(-1_800), units: 3, segment: 0),
+                              CapacityPoint(date: now.addingTimeInterval(-1_200), units: 2.5, segment: 0),
+                              CapacityPoint(date: now.addingTimeInterval(-1_200), units: 6.5, segment: 0),
+                              CapacityPoint(date: now, units: 6, segment: 0)]
+        let intervalReset = CapacityReset(date: now.addingTimeInterval(-1_200), accountName: "A",
+            before: 2.5, after: 6.5, projected: false)
+        let intervals = CapacityForecast.intervals(points: intervalPoints, resets: [intervalReset],
+            start: now.addingTimeInterval(-3_600), end: now, duration: 1_800)
+        precondition(intervals.count == 2)
+        close(intervals[0].startUnits, 4)
+        close(intervals[0].endUnits, 3)
+        close(intervals[0].consumedUnits, 1)
+        precondition(intervals[0].resets.isEmpty)
+        precondition(intervals[1].resets.count == 1)
+        close(intervals[1].consumedUnits, 1)
+        precondition(CapacityForecast.intervals(points: intervalPoints, resets: [], start: now, end: now, duration: 1_800).isEmpty)
+        let sevenDayPoints = [CapacityPoint(date: now.addingTimeInterval(-7 * 86_400), units: 4, segment: 0),
+                              CapacityPoint(date: now, units: 2, segment: 0)]
+        precondition(CapacityForecast.intervals(points: sevenDayPoints, resets: [],
+            start: now.addingTimeInterval(-7 * 86_400), end: now, duration: 86_400).count == 7)
+        var utc = Calendar(identifier: .gregorian)
+        utc.timeZone = TimeZone(secondsFromGMT: 0)!
+        let unaligned = utc.date(from: DateComponents(year: 2027, month: 1, day: 15,
+            hour: 23, minute: 43, second: 27))!
+        let tenMinuteEnd = CapacityForecast.alignedIntervalEnd(now: unaligned, duration: 10 * 60, calendar: utc)
+        let hourEnd = CapacityForecast.alignedIntervalEnd(now: unaligned, duration: 3_600, calendar: utc)
+        let fourHourEnd = CapacityForecast.alignedIntervalEnd(now: unaligned, duration: 4 * 3_600, calendar: utc)
+        precondition(utc.component(.minute, from: tenMinuteEnd) == 40)
+        precondition(utc.component(.hour, from: hourEnd) == 23 && utc.component(.minute, from: hourEnd) == 0)
+        precondition(utc.component(.hour, from: fourHourEnd) == 20 && utc.component(.minute, from: fourHourEnd) == 0)
         func account(_ name: String, plan: String = "Pro 20×", used: Double, resetHours: Double) -> CodexAccount {
             CodexAccount(name: name, planName: plan, snapshots: [UsageSnapshot(capturedAt: now,
                 usedPercent: used, resetAt: now.addingTimeInterval(resetHours * 3_600))])

@@ -9,11 +9,22 @@ private final class CapacityGraphSelection: ObservableObject {
     @Published var showsPercent: Bool {
         didSet { UserDefaults.standard.set(showsPercent, forKey: "codex-runway.graph-percent.v1") }
     }
+    @Published var mode: CapacityViewMode {
+        didSet { UserDefaults.standard.set(mode.rawValue, forKey: "codex-runway.capacity-view.v1") }
+    }
 
     init() {
         range = CapacityGraphRange(rawValue: UserDefaults.standard.string(forKey: "codex-runway.graph-range.v1") ?? "") ?? .overview
         showsPercent = UserDefaults.standard.bool(forKey: "codex-runway.graph-percent.v1")
+        mode = CapacityViewMode(rawValue: UserDefaults.standard.string(forKey: "codex-runway.capacity-view.v1") ?? "") ?? .graph
     }
+}
+
+private enum CapacityViewMode: String, CaseIterable, Identifiable {
+    case graph, table
+    var id: String { rawValue }
+    var label: String { rawValue.capitalized }
+    var icon: String { self == .graph ? "chart.xyaxis.line" : "tablecells" }
 }
 
 private enum CapacityGraphRange: String, CaseIterable, Identifiable {
@@ -24,6 +35,16 @@ private enum CapacityGraphRange: String, CaseIterable, Identifiable {
     }
     var lookback: TimeInterval? {
         switch self { case .overview: nil; case .hour: 3_600; case .sixHours: 21_600; case .day: 86_400; case .threeDays: 3 * 86_400; case .week: 7 * 86_400 }
+    }
+    var tableInterval: TimeInterval {
+        switch self {
+        case .overview: 8 * 3_600
+        case .hour: 10 * 60
+        case .sixHours: 3_600
+        case .day: 4 * 3_600
+        case .threeDays: 12 * 3_600
+        case .week: 86_400
+        }
     }
 }
 
@@ -48,17 +69,29 @@ struct CapacityGraphView: View {
                 summary(report, showsPercent: selection.showsPercent)
                     .font(.caption)
                     .fixedSize(horizontal: false, vertical: true)
-                if report.hasAssumedResets {
-                    Text("Includes assumed resets · next dates unknown until synced")
-                        .font(.caption).foregroundStyle(.secondary)
+                if report.issue == nil, let rate = report.ratePerHour {
+                    Text("\(paceLabel(rate * 24, percent: selection.showsPercent)) · \(averageLabel(report))")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
                 }
                 HStack(spacing: 6) {
-                    if report.issue == nil, let rate = report.ratePerHour {
-                        Text("\(paceLabel(rate * 24, percent: selection.showsPercent)) · \(averageLabel(report))")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                            .lineLimit(1)
-                            .fixedSize()
+                    Text("View")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    Picker("Display", selection: $selection.mode) {
+                        ForEach(CapacityViewMode.allCases) { mode in
+                            Image(systemName: mode.icon).tag(mode)
+                        }
+                    }
+                    .labelsHidden()
+                    .pickerStyle(.segmented)
+                    .controlSize(.mini)
+                    .frame(width: 58)
+                    .help("Switch between graph and table")
+                    .onChange(of: selection.mode) { _, _ in
+                        selection.date = nil
+                        NotificationCenter.default.post(name: .runwayPanelLayoutChanged, object: nil)
                     }
                     Spacer()
                     Text("Range")
@@ -71,7 +104,10 @@ struct CapacityGraphView: View {
                     .pickerStyle(.menu)
                     .controlSize(.small)
                     .fixedSize()
-                    .onChange(of: selection.range) { _, _ in selection.date = nil }
+                    .onChange(of: selection.range) { _, _ in
+                        selection.date = nil
+                        NotificationCenter.default.post(name: .runwayPanelLayoutChanged, object: nil)
+                    }
                     Divider().frame(height: 15)
                     Text("Units")
                         .font(.caption)
@@ -87,13 +123,129 @@ struct CapacityGraphView: View {
                 }
                 .help("Capacity scale: Pro 20× equals 100%, and Pro 5× equals 25%")
                 if report.total > 0 {
-                    graph(report, range: selection.range, now: context.date)
-                        .frame(height: 100)
+                    if selection.mode == .graph {
+                        graph(report, range: selection.range, now: context.date)
+                            .frame(height: 118)
+                    } else {
+                        table(report, range: selection.range, now: context.date)
+                    }
                 }
             }
             .padding(10)
             .background(.white.opacity(0.5), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
         }
+    }
+
+    private func table(_ report: CapacityReport, range: CapacityGraphRange, now: Date) -> some View {
+        let end = CapacityForecast.alignedIntervalEnd(now: now, duration: range.tableInterval)
+        let start = end.addingTimeInterval(-(range.lookback ?? 2 * CapacityForecast.day))
+        let rows = CapacityForecast.intervals(points: report.history, resets: report.resets,
+            start: start, end: end, duration: range.tableInterval).reversed()
+        let upcoming = range == .overview
+            ? report.resets.filter { $0.projected && $0.date > now }.sorted { $0.date < $1.date }
+            : []
+        return VStack(spacing: 3) {
+            HStack(spacing: 8) {
+                Text("Interval").frame(maxWidth: .infinity, alignment: .leading)
+                Text("Used").frame(width: 78, alignment: .trailing)
+                Text("Balance").frame(width: 72, alignment: .trailing)
+            }
+            .font(.system(size: 9, weight: .semibold))
+            .foregroundStyle(.secondary)
+            Divider()
+            VStack(spacing: 0) {
+                if rows.isEmpty {
+                    Text("Not enough saved history for this range")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(.vertical, 8)
+                } else {
+                    ForEach(Array(rows)) { row in
+                        historyRow(row, range: range)
+                    }
+                }
+                if !upcoming.isEmpty {
+                    sectionLabel("Upcoming resets")
+                    ForEach(upcoming) { reset in upcomingResetRow(reset) }
+                }
+            }
+        }
+        .accessibilityLabel(range == .overview
+            ? "Combined allowance history and upcoming resets table"
+            : "Combined allowance history table for the past \(range.label)")
+    }
+
+    private func historyRow(_ row: CapacityInterval, range: CapacityGraphRange) -> some View {
+        HStack(spacing: 8) {
+            HStack(spacing: 4) {
+                Text(intervalLabel(row, range: range))
+                if !row.resets.isEmpty {
+                    Image(systemName: "arrow.clockwise")
+                        .foregroundStyle(.teal)
+                    if row.resets.count > 1 {
+                        Text("\(row.resets.count)")
+                            .font(.system(size: 8, weight: .semibold))
+                            .foregroundStyle(.teal)
+                    }
+                }
+            }
+                .help(resetHelp(row.resets))
+                .frame(maxWidth: .infinity, alignment: .leading)
+            Text(usageLabel(row.consumedUnits))
+                .frame(width: 78, alignment: .trailing)
+            Text(capacityLabel(row.endUnits, percent: selection.showsPercent, decimals: 1))
+                .frame(width: 72, alignment: .trailing)
+        }
+        .font(.system(size: 10))
+        .padding(.vertical, 3)
+        .overlay(alignment: .bottom) { Divider().opacity(0.35) }
+    }
+
+    private func sectionLabel(_ label: String) -> some View {
+        Text(label)
+            .font(.system(size: 9, weight: .semibold))
+            .foregroundStyle(.secondary)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.top, 7)
+            .padding(.bottom, 2)
+    }
+
+    private func upcomingResetRow(_ reset: CapacityReset) -> some View {
+        HStack(spacing: 8) {
+            Text(reset.accountName).lineLimit(1)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            Text(reset.date.formatted(.dateTime.day().month(.abbreviated).hour().minute()))
+                .foregroundStyle(.teal)
+                .frame(width: 158, alignment: .trailing)
+        }
+        .font(.system(size: 10))
+        .padding(.vertical, 3)
+        .overlay(alignment: .bottom) { Divider().opacity(0.35) }
+    }
+
+    private func intervalLabel(_ row: CapacityInterval, range: CapacityGraphRange) -> String {
+        if range == .week || range == .overview {
+            return row.start.formatted(.dateTime.day().month(.abbreviated))
+        }
+        if range == .threeDays {
+            return "\(row.start.formatted(.dateTime.weekday(.abbreviated))) \(row.start.formatted(.dateTime.hour()))–\(row.end.formatted(.dateTime.hour()))"
+        }
+        return "\(row.start.formatted(.dateTime.hour().minute()))–\(row.end.formatted(.dateTime.hour().minute()))"
+    }
+
+    private func usageLabel(_ units: Double) -> String {
+        let displayed = selection.showsPercent ? CapacityForecast.percentage(forUnits: units) : units
+        if abs(displayed) < 0.005 { return "—" }
+        if selection.showsPercent { return String(format: "%.1f%%", displayed) }
+        return String(format: "%.2f", displayed)
+    }
+
+    private func resetHelp(_ resets: [CapacityReset]) -> String {
+        guard !resets.isEmpty else { return "" }
+        return resets.map {
+            "\($0.accountName): \($0.assumed ? "assumed" : "confirmed") reset at \($0.date.formatted(.dateTime.hour().minute()))"
+        }.joined(separator: "\n")
     }
 
     @ViewBuilder

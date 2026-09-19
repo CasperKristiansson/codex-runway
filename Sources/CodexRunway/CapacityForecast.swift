@@ -7,6 +7,20 @@ struct CapacityPoint: Identifiable {
     let segment: Int
 }
 
+struct CapacityInterval: Identifiable {
+    var id: Date { start }
+    let start: Date
+    let end: Date
+    let startUnits: Double
+    let endUnits: Double
+    let resets: [CapacityReset]
+
+    var consumedUnits: Double {
+        let replenished = resets.reduce(0) { $0 + max(0, $1.after - $1.before) }
+        return max(0, startUnits + replenished - endUnits)
+    }
+}
+
 struct CapacityReset: Identifiable {
     let id = UUID()
     let date: Date
@@ -70,6 +84,42 @@ enum CapacityForecast {
 
     // One Pro 20× allowance is four internal units and defines 100%.
     static func percentage(forUnits units: Double) -> Double { units * 25 }
+
+    static func alignedIntervalEnd(now: Date, duration: TimeInterval, calendar: Calendar = .current) -> Date {
+        if duration < 3_600 {
+            let step = max(1, Int(duration / 60))
+            var components = calendar.dateComponents([.year, .month, .day, .hour, .minute], from: now)
+            components.minute = ((components.minute ?? 0) / step) * step
+            return calendar.date(from: components) ?? now
+        }
+        if duration < day {
+            let step = max(1, Int(duration / 3_600))
+            var components = calendar.dateComponents([.year, .month, .day, .hour], from: now)
+            components.hour = ((components.hour ?? 0) / step) * step
+            return calendar.date(from: components) ?? now
+        }
+        return calendar.startOfDay(for: now)
+    }
+
+    static func intervals(points: [CapacityPoint], resets: [CapacityReset], start: Date, end: Date,
+                          duration: TimeInterval) -> [CapacityInterval] {
+        guard duration > 0, start < end else { return [] }
+        var result: [CapacityInterval] = []
+        var intervalStart = start
+        while intervalStart < end {
+            let intervalEnd = min(intervalStart.addingTimeInterval(duration), end)
+            if let startUnits = value(at: intervalStart, in: points),
+               let endUnits = value(at: intervalEnd, in: points) {
+                let intervalResets = resets.filter {
+                    !$0.projected && $0.date > intervalStart && $0.date <= intervalEnd
+                }
+                result.append(CapacityInterval(start: intervalStart, end: intervalEnd,
+                    startUnits: startUnits, endUnits: endUnits, resets: intervalResets))
+            }
+            intervalStart = intervalEnd
+        }
+        return result
+    }
 
     static func report(accounts: [CodexAccount], now: Date = .now) -> CapacityReport {
         let accounts = accounts.filter(\.isEnabled)

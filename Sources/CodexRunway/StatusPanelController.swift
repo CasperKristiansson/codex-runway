@@ -1,6 +1,10 @@
 import AppKit
 import SwiftUI
 
+extension Notification.Name {
+    static let runwayPanelLayoutChanged = Notification.Name("codex-runway.panel-layout-changed")
+}
+
 /// Own the window shape rather than inheriting MenuBarExtra's private frame.
 @MainActor
 final class StatusPanelController: NSObject, NSWindowDelegate {
@@ -46,7 +50,11 @@ final class StatusPanelController: NSObject, NSWindowDelegate {
         hosting.sizingOptions = [.intrinsicContentSize]
         hostingView = hosting
         panel.contentView = hosting
+        NotificationCenter.default.addObserver(self, selector: #selector(contentLayoutChanged),
+            name: .runwayPanelLayoutChanged, object: nil)
     }
+
+    deinit { NotificationCenter.default.removeObserver(self) }
 
     @objc private func togglePanel() {
         if panel.isVisible {
@@ -104,6 +112,11 @@ final class StatusPanelController: NSObject, NSWindowDelegate {
             panel.setFrame(frame, display: panel.isVisible)
             panel.invalidateShadow()
         }
+    }
+
+    @objc private func contentLayoutChanged() {
+        guard panel.isVisible else { return }
+        DispatchQueue.main.async { [weak self] in self?.sizeAndPositionPanel() }
     }
 
     private func panelContent(maximumHeight: CGFloat) -> AnyView {
