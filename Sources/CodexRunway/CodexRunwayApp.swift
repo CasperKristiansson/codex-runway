@@ -55,6 +55,7 @@ struct MenuBarView: View {
                     .overlay {
                         ScrollView {
                             accountList(store.dashboardAccounts)
+                                .background(RunwayScrollerInstaller())
                         }
                     }
             } else {

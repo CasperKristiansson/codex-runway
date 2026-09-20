@@ -1,10 +1,6 @@
 import AppKit
 import SwiftUI
 
-extension Notification.Name {
-    static let runwayPanelLayoutChanged = Notification.Name("codex-runway.panel-layout-changed")
-}
-
 /// Own the window shape rather than inheriting MenuBarExtra's private frame.
 @MainActor
 final class StatusPanelController: NSObject, NSWindowDelegate {
@@ -16,7 +12,7 @@ final class StatusPanelController: NSObject, NSWindowDelegate {
         contentRect: .zero, styleMask: [.borderless, .nonactivatingPanel],
         backing: .buffered, defer: false
     )
-    private var hostingView: NSHostingView<AnyView>?
+    private var hostingController: NSHostingController<AnyView>?
     private var contentMaximumHeight: CGFloat?
     private var lastValidPanelHeight: CGFloat?
     private var settingsWindow: NSWindow?
@@ -44,17 +40,13 @@ final class StatusPanelController: NSObject, NSWindowDelegate {
         panel.delegate = self
         let maximumHeight = NSScreen.main?.visibleFrame.height ?? 800
         contentMaximumHeight = maximumHeight
-        let hosting = NSHostingView(rootView: panelContent(maximumHeight: maximumHeight))
-        // Retain intrinsic measurement, but do not impose hosting min/max
-        // window constraints: this panel owns its size and top-edge anchor.
-        hosting.sizingOptions = [.intrinsicContentSize]
-        hostingView = hosting
-        panel.contentView = hosting
-        NotificationCenter.default.addObserver(self, selector: #selector(contentLayoutChanged),
-            name: .runwayPanelLayoutChanged, object: nil)
+        let hosting = NSHostingController(rootView: panelContent(maximumHeight: maximumHeight))
+        // SwiftUI's changing intrinsic height must not resize the NSWindow
+        // independently of sizeAndPositionPanel(), which pins its top edge.
+        hosting.sizingOptions = []
+        hostingController = hosting
+        panel.contentViewController = hosting
     }
-
-    deinit { NotificationCenter.default.removeObserver(self) }
 
     @objc private func togglePanel() {
         if panel.isVisible {
@@ -78,7 +70,7 @@ final class StatusPanelController: NSObject, NSWindowDelegate {
     }
 
     private func sizeAndPositionPanel() {
-        guard let hostingView, let button = statusItem.button, let buttonWindow = button.window else { return }
+        guard let hostingController, let button = statusItem.button, let buttonWindow = button.window else { return }
         let anchor = buttonWindow.convertToScreen(button.convert(button.bounds, to: nil))
         let screen = buttonWindow.screen?.visibleFrame
             ?? NSScreen.screens.first(where: { $0.frame.contains(NSPoint(x: anchor.midX, y: anchor.midY)) })?.visibleFrame
@@ -89,11 +81,10 @@ final class StatusPanelController: NSObject, NSWindowDelegate {
         // Replacing it during a drop restarts layout while AppKit is measuring it.
         if contentMaximumHeight != maximumHeight {
             contentMaximumHeight = maximumHeight
-            hostingView.rootView = panelContent(maximumHeight: maximumHeight)
+            hostingController.rootView = panelContent(maximumHeight: maximumHeight)
         }
-        hostingView.invalidateIntrinsicContentSize()
-        hostingView.layoutSubtreeIfNeeded()
-        let measuredHeight = hostingView.fittingSize.height
+        let width = min(Self.panelWidth, max(1, screen.width - 12))
+        let measuredHeight = hostingController.sizeThatFits(in: NSSize(width: width, height: maximumHeight)).height
         let height: CGFloat
         if measuredHeight.isFinite, measuredHeight >= Self.minimumUsableHeight {
             height = min(measuredHeight, maximumHeight)
@@ -105,18 +96,12 @@ final class StatusPanelController: NSObject, NSWindowDelegate {
             // the status item where its content is clipped off-screen.
             height = min(lastValidPanelHeight ?? max(panel.frame.height, Self.minimumUsableHeight), maximumHeight)
         }
-        let width = min(Self.panelWidth, max(1, screen.width - 12))
         let x = max(screen.minX + 6, min(anchor.midX - width / 2, screen.maxX - width - 6))
         let frame = NSRect(x: x, y: anchor.minY - height - 5, width: width, height: height)
         if panel.frame != frame {
             panel.setFrame(frame, display: panel.isVisible)
             panel.invalidateShadow()
         }
-    }
-
-    @objc private func contentLayoutChanged() {
-        guard panel.isVisible else { return }
-        DispatchQueue.main.async { [weak self] in self?.sizeAndPositionPanel() }
     }
 
     private func panelContent(maximumHeight: CGFloat) -> AnyView {
@@ -175,7 +160,10 @@ struct FittingMenuPanel: View {
     var body: some View {
         ViewThatFits(in: .vertical) {
             content.fixedSize(horizontal: false, vertical: true)
-            ScrollView { content }.frame(height: maximumHeight)
+            ScrollView {
+                content.background(RunwayScrollerInstaller())
+            }
+            .frame(height: maximumHeight)
         }
         .frame(width: 420)
         .frame(maxHeight: maximumHeight, alignment: .top)

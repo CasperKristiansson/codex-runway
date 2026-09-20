@@ -91,7 +91,6 @@ struct CapacityGraphView: View {
                     .help("Switch between graph and table")
                     .onChange(of: selection.mode) { _, _ in
                         selection.date = nil
-                        NotificationCenter.default.post(name: .runwayPanelLayoutChanged, object: nil)
                     }
                     Spacer()
                     Text("Range")
@@ -106,7 +105,6 @@ struct CapacityGraphView: View {
                     .fixedSize()
                     .onChange(of: selection.range) { _, _ in
                         selection.date = nil
-                        NotificationCenter.default.post(name: .runwayPanelLayoutChanged, object: nil)
                     }
                     Divider().frame(height: 15)
                     Text("Units")
@@ -123,12 +121,16 @@ struct CapacityGraphView: View {
                 }
                 .help("Capacity scale: Pro 20× equals 100%, and Pro 5× equals 25%")
                 if report.total > 0 {
-                    if selection.mode == .graph {
-                        graph(report, range: selection.range, now: context.date)
-                            .frame(height: 118)
-                    } else {
-                        table(report, range: selection.range, now: context.date)
+                    Group {
+                        if selection.mode == .graph {
+                            graph(report, range: selection.range, now: context.date)
+                                .frame(height: CapacityDisplayLayout.height)
+                        } else {
+                            table(report, range: selection.range, now: context.date)
+                        }
                     }
+                    // Range and view changes must not alter the open panel's frame.
+                    .frame(height: CapacityDisplayLayout.height, alignment: .top)
                 }
             }
             .padding(10)
@@ -152,28 +154,48 @@ struct CapacityGraphView: View {
             }
             .font(.system(size: 9, weight: .semibold))
             .foregroundStyle(.secondary)
+            .frame(height: CapacityDisplayLayout.headerHeight)
             Divider()
-            VStack(spacing: 0) {
-                if rows.isEmpty {
-                    Text("Not enough saved history for this range")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .padding(.vertical, 8)
-                } else {
-                    ForEach(Array(rows)) { row in
-                        historyRow(row, range: range)
-                    }
+            if range == .overview {
+                ScrollView(.vertical) {
+                    tableRows(Array(rows), upcoming: upcoming, range: range)
+                        .background(RunwayScrollerInstaller())
                 }
-                if !upcoming.isEmpty {
-                    sectionLabel("Upcoming resets")
-                    ForEach(upcoming) { reset in upcomingResetRow(reset) }
-                }
+                .frame(height: CapacityDisplayLayout.rowsHeight)
+            } else {
+                tableRows(Array(rows), upcoming: [], range: range)
+                    .frame(height: CapacityDisplayLayout.rowsHeight, alignment: .top)
             }
         }
         .accessibilityLabel(range == .overview
             ? "Combined allowance history and upcoming resets table"
             : "Combined allowance history table for the past \(range.label)")
+    }
+
+    private func tableRows(_ rows: [CapacityInterval], upcoming: [CapacityReset],
+                           range: CapacityGraphRange) -> some View {
+        VStack(spacing: 0) {
+            if rows.isEmpty {
+                Text("Not enough saved history for this range")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.vertical, 8)
+            } else {
+                ForEach(Array(rows.enumerated()), id: \.offset) { index, row in
+                    historyRow(row, range: range)
+                        .id(index)
+                }
+            }
+            if !upcoming.isEmpty {
+                sectionLabel("Upcoming resets")
+                    .id(rows.count)
+                ForEach(Array(upcoming.enumerated()), id: \.offset) { index, reset in
+                    upcomingResetRow(reset)
+                        .id(rows.count + 1 + index)
+                }
+            }
+        }
     }
 
     private func historyRow(_ row: CapacityInterval, range: CapacityGraphRange) -> some View {
@@ -198,7 +220,7 @@ struct CapacityGraphView: View {
                 .frame(width: 72, alignment: .trailing)
         }
         .font(.system(size: 10))
-        .padding(.vertical, 3)
+        .frame(height: CapacityDisplayLayout.rowHeight)
         .overlay(alignment: .bottom) { Divider().opacity(0.35) }
     }
 
@@ -207,8 +229,7 @@ struct CapacityGraphView: View {
             .font(.system(size: 9, weight: .semibold))
             .foregroundStyle(.secondary)
             .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(.top, 7)
-            .padding(.bottom, 2)
+            .frame(height: CapacityDisplayLayout.resetSectionHeight, alignment: .bottom)
     }
 
     private func upcomingResetRow(_ reset: CapacityReset) -> some View {
@@ -220,7 +241,7 @@ struct CapacityGraphView: View {
                 .frame(width: 158, alignment: .trailing)
         }
         .font(.system(size: 10))
-        .padding(.vertical, 3)
+        .frame(height: CapacityDisplayLayout.rowHeight)
         .overlay(alignment: .bottom) { Divider().opacity(0.35) }
     }
 

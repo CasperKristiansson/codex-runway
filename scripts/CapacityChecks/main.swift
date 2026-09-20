@@ -7,6 +7,10 @@ struct CapacityChecks {
     }
 
     static func main() {
+        precondition(CapacityDisplayLayout.rowsHeight == 7 * CapacityDisplayLayout.rowHeight)
+        precondition(CapacityDisplayLayout.height == CapacityDisplayLayout.headerHeight + 8 +
+            CapacityDisplayLayout.rowsHeight)
+        precondition(CapacityDisplayLayout.height > 118, "Graph and every table range must share seven-row height")
         let now = Date(timeIntervalSince1970: 1_800_000_000)
         let hoverPoints = [CapacityPoint(date: now, units: 4, segment: 0),
                            CapacityPoint(date: now.addingTimeInterval(100), units: 2, segment: 0),
