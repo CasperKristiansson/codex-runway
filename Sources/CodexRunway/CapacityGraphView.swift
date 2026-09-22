@@ -2,7 +2,6 @@ import Charts
 import SwiftUI
 
 private final class CapacityGraphSelection: ObservableObject {
-    @Published var date: Date?
     @Published var range: CapacityGraphRange {
         didSet { UserDefaults.standard.set(range.rawValue, forKey: "codex-runway.graph-range.v1") }
     }
@@ -18,6 +17,13 @@ private final class CapacityGraphSelection: ObservableObject {
         showsPercent = UserDefaults.standard.bool(forKey: "codex-runway.graph-percent.v1")
         mode = CapacityViewMode(rawValue: UserDefaults.standard.string(forKey: "codex-runway.capacity-view.v1") ?? "") ?? .graph
     }
+}
+
+private struct CapacityHoverGraph<Content: View>: View {
+    @StateObject private var hover = CapacityHoverSelection()
+    let content: (CapacityHoverSelection) -> Content
+
+    var body: some View { content(hover) }
 }
 
 private enum CapacityViewMode: String, CaseIterable, Identifiable {
@@ -92,9 +98,6 @@ struct CapacityGraphView: View {
                     .controlSize(.mini)
                     .frame(width: 58)
                     .help("Switch between graph and table")
-                    .onChange(of: selection.mode) { _, _ in
-                        selection.date = nil
-                    }
                     Spacer()
                     Text("Range")
                         .font(.caption)
@@ -106,9 +109,6 @@ struct CapacityGraphView: View {
                     .pickerStyle(.menu)
                     .controlSize(.small)
                     .fixedSize()
-                    .onChange(of: selection.range) { _, _ in
-                        selection.date = nil
-                    }
                     Divider().frame(height: 15)
                     Text("Units")
                         .font(.caption)
@@ -126,8 +126,11 @@ struct CapacityGraphView: View {
                 if report.total > 0 {
                     Group {
                         if selection.mode == .graph {
-                            graph(report, range: selection.range, now: context.date)
-                                .frame(height: CapacityDisplayLayout.height)
+                            CapacityHoverGraph { hover in
+                                graph(report, range: selection.range, now: context.date, hover: hover)
+                            }
+                            .id(selection.range)
+                            .frame(height: CapacityDisplayLayout.height)
                         } else {
                             table(report, range: selection.range, now: context.date)
                         }
@@ -318,7 +321,8 @@ struct CapacityGraphView: View {
             : String(format: "−%.1f units at reset", units)
     }
 
-    private func graph(_ report: CapacityReport, range: CapacityGraphRange, now: Date) -> some View {
+    private func graph(_ report: CapacityReport, range: CapacityGraphRange, now: Date,
+                       hover: CapacityHoverSelection) -> some View {
         let isOverview = range == .overview
         let start = now.addingTimeInterval(-(range.lookback ?? 2 * CapacityForecast.day))
         let futureResets = isOverview ? report.resets.filter { $0.projected && $0.date > now } : []
@@ -377,7 +381,7 @@ struct CapacityGraphView: View {
                     .foregroundStyle(.indigo)
                     .symbolSize(32)
             }
-            if let date = selection.date {
+            if let date = hover.date {
                 RuleMark(x: .value("Inspect", date)).foregroundStyle(.indigo.opacity(0.2))
             }
         }
@@ -423,15 +427,16 @@ struct CapacityGraphView: View {
                         case .active(let location):
                             if let plotFrame = proxy.plotFrame {
                                 let frame = geometry[plotFrame]
-                                selection.date = frame.contains(location) ? proxy.value(atX: location.x - frame.minX, as: Date.self) : nil
+                                hover.move(to: frame.contains(location)
+                                    ? proxy.value(atX: location.x - frame.minX, as: Date.self) : nil)
                             }
-                        case .ended: selection.date = nil
+                        case .ended: hover.end()
                         }
                     }
             }
         }
         .overlay(alignment: .topLeading) {
-            if let date = selection.date {
+            if let date = hover.date {
                 let reset = visibleResets.min { abs($0.date.timeIntervalSince(date)) < abs($1.date.timeIntervalSince(date)) }
                 let tolerance = end.timeIntervalSince(start) / 55
                 let nearbyReset = reset.flatMap { abs($0.date.timeIntervalSince(date)) <= tolerance ? $0 : nil }

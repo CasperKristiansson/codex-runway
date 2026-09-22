@@ -25,7 +25,7 @@ private struct AnalyticsSeries {
 struct AnalyticsView: View {
     @EnvironmentObject private var store: RunwayStore
     @Binding var selection: UUID?
-    @State private var usageRange: AnalyticsRange = .month
+    @State private var usageRange: AnalyticsRange = .week
     @State private var toolRange: AnalyticsRange = .week
     @State private var messageRange: AnalyticsRange = .week
     @State private var usageGroup = "Feature"
@@ -131,9 +131,11 @@ struct AnalyticsView: View {
 
     private var usageSection: some View {
         let chartDays = days(for: usageRange)
-        let series = makeSeries(usageBuckets(days: chartDays), days: chartDays, limit: 5)
+        let selectableDays = Set(chartDays)
+        let buckets = usageBuckets(days: chartDays)
+        let series = makeSeries(buckets, days: chartDays, limit: 5)
         return VStack(alignment: .leading, spacing: 12) {
-            sectionHeader("Usage history", subtitle: "Share of plan limits consumed by feature, model, or surface") {
+            sectionHeader("Usage history", subtitle: "Plan usage by day, feature, model, or surface") {
                 rangePicker($usageRange)
                 Picker("Breakdown", selection: $usageGroup) {
                     Text("By feature").tag("Feature")
@@ -142,13 +144,20 @@ struct AnalyticsView: View {
                 }
                 .labelsHidden().frame(width: 140)
             }
-            VStack(alignment: .leading, spacing: 14) {
-                if selectedAccount == nil {
-                    Text("Combined percentage is weighted by each saved account's plan capacity.")
+            UsageDaySelectionHost { daySelection in
+                let selectedDay = daySelection.wrappedValue.flatMap { chartDays.contains($0) ? $0 : nil }
+                    ?? chartDays.last ?? ""
+                return VStack(alignment: .leading, spacing: 14) {
+                    if selectedAccount == nil {
+                        Text("Combined percentage is weighted by each saved account's plan capacity.")
+                            .font(.system(size: 11)).foregroundStyle(.secondary)
+                    }
+                    analyticsChart(series, kind: .bar, title: "Plan usage", unit: "% of limit", showsTotal: false,
+                                   selection: daySelection, selectedDay: selectedDay, selectionDays: selectableDays)
+                    Text("\(selectedDay) breakdown")
                         .font(.system(size: 11)).foregroundStyle(.secondary)
+                    categorySummary(buckets[selectedDay] ?? [:])
                 }
-                analyticsChart(series, kind: .bar, title: "Plan usage", unit: "% of limit", showsTotal: false)
-                categorySummary(series, unit: "%")
             }
             .padding(18)
             .analyticsCard()
@@ -195,13 +204,17 @@ struct AnalyticsView: View {
     }
 
     private var chatsSection: some View {
+        let chatSyncTime = saved.count == 1 ? saved.first?.1.chatsFetchedAt : nil
+        let subtitle = chatSyncTime.map {
+            "Compare each saved task's plan and credit usage · Synced \($0.formatted(date: .abbreviated, time: .shortened))"
+        } ?? "Compare each saved task's plan and credit usage"
         let rows = saved.flatMap { account, archive in
             archive.chats.map { (account.name, $0) }
         }.filter { $0.1.weeklyLimitPercent != nil }
             .sorted { ($0.1.weeklyLimitPercent ?? 0) > ($1.1.weeklyLimitPercent ?? 0) }
         let displayed = showsAllChats ? rows : Array(rows.prefix(5))
         return VStack(alignment: .leading, spacing: 12) {
-            sectionHeader("Top chats", subtitle: "Compare each saved task's plan and credit usage") { EmptyView() }
+            sectionHeader("Top chats", subtitle: subtitle) { EmptyView() }
             VStack(spacing: 0) {
                 HStack {
                     Text("Chat")
@@ -346,7 +359,8 @@ struct AnalyticsView: View {
     private enum ChartKind { case line, bar }
 
     private func analyticsChart(_ series: AnalyticsSeries, kind: ChartKind, title: String, unit: String,
-                                showsTotal: Bool = true) -> some View {
+                                showsTotal: Bool = true, selection: Binding<String?>? = nil,
+                                selectedDay: String? = nil, selectionDays: Set<String> = []) -> some View {
         VStack(alignment: .leading, spacing: 12) {
             if showsTotal {
                 VStack(alignment: .leading, spacing: 2) {
@@ -367,18 +381,26 @@ struct AnalyticsView: View {
                     BarMark(x: .value("Date", point.date), y: .value("Usage", point.value))
                         .foregroundStyle(by: .value("Category", point.category))
                 }
+                if let selectedDay, point.day == selectedDay && point.category == series.categories.first?.name {
+                    RuleMark(x: .value("Selected day", point.date))
+                        .foregroundStyle(Color.gray.opacity(0.45))
+                }
             }
             .chartForegroundStyleScale(domain: series.categories.map(\.name),
-                                       range: Array(colors.prefix(series.categories.count)))
+                                       range: Array(series.categories.enumerated()).map {
+                                           chartColor($0.element.name, index: $0.offset, selectedDay: selectedDay)
+                                       })
             .chartLegend(.hidden)
             .chartXScale(range: .plotDimension(startPadding: 25, endPadding: 50))
             .chartXAxis { AxisMarks(values: .automatic(desiredCount: 4)) { AxisValueLabel() } }
             .chartYAxis { AxisMarks(position: .leading) { AxisGridLine(); AxisValueLabel() } }
+            .modifier(UsageChartSelection(selection: selection, days: selectionDays))
             .frame(height: 175)
             HStack(spacing: 14) {
                 ForEach(Array(series.categories.enumerated()), id: \.offset) { index, category in
                     HStack(spacing: 4) {
-                        Circle().fill(colors[index % colors.count]).frame(width: 8, height: 8)
+                        Circle().fill(chartColor(category.name, index: index, selectedDay: selectedDay))
+                            .frame(width: 8, height: 8)
                         Text(category.name).lineLimit(1)
                     }
                 }
@@ -387,14 +409,19 @@ struct AnalyticsView: View {
         }
     }
 
-    private func categorySummary(_ series: AnalyticsSeries, unit: String) -> some View {
-        LazyVGrid(columns: Array(repeating: GridItem(.flexible(), alignment: .leading), count: 3), spacing: 12) {
-            ForEach(Array(series.categories.enumerated()), id: \.offset) { index, category in
+    private func categorySummary(_ values: [String: Double]) -> some View {
+        let total = values.values.reduce(0, +)
+        let categories = values.filter { $0.value > 0 }
+            .sorted { $0.value > $1.value }
+            .prefix(6)
+        return LazyVGrid(columns: Array(repeating: GridItem(.flexible(), alignment: .leading), count: 3), spacing: 12) {
+            ForEach(Array(categories.enumerated()), id: \.offset) { index, category in
                 HStack(alignment: .top, spacing: 7) {
-                    RoundedRectangle(cornerRadius: 2).fill(colors[index % colors.count]).frame(width: 3, height: 38)
+                    RoundedRectangle(cornerRadius: 2).fill(chartColor(category.key, index: index, selectedDay: "usage"))
+                        .frame(width: 3, height: 38)
                     VStack(alignment: .leading, spacing: 2) {
-                        Text(category.name).font(.system(size: 11)).lineLimit(1)
-                        Text(series.total > 0 ? String(format: "%.1f%%", category.total / series.total * 100) : "0%")
+                        Text(category.key).font(.system(size: 11)).lineLimit(1)
+                        Text(total > 0 ? String(format: "%.1f%%", category.value / total * 100) : "0%")
                             .font(.system(size: 15))
                     }
                 }
@@ -493,9 +520,24 @@ struct AnalyticsView: View {
         case "memory_consolidation", "memory_update": "Memory updates"
         case "guardian_review", "auto_review": "Auto review"
         case "commit_message": "Commit messages"
+        case "subagent": "Subagents"
+        case "thread_description": "Task descriptions"
         case "automation": "Automations"
         case "code_review": "Code review"
         default: key.replacingOccurrences(of: "_", with: " ").capitalized
+        }
+    }
+
+    private func chartColor(_ name: String, index: Int, selectedDay: String?) -> Color {
+        guard selectedDay != nil && usageGroup == "Feature" else { return colors[index % colors.count] }
+        return switch name {
+        case "Tasks": Color(red: 0.16, green: 0.38, blue: 0.76)
+        case "Memory updates": Color(red: 0.28, green: 0.74, blue: 0.43)
+        case "Auto review": Color(red: 0.97, green: 0.49, blue: 0.20)
+        case "Commit messages": Color(red: 0.90, green: 0.18, blue: 0.19)
+        case "Subagents", "Subagent": Color(red: 0.18, green: 0.70, blue: 0.69)
+        case "Task descriptions": Color(red: 0.91, green: 0.39, blue: 0.67)
+        default: colors[index % colors.count]
         }
     }
 
@@ -513,6 +555,43 @@ struct AnalyticsView: View {
     private func percent(_ basisPoints: Double) -> String {
         let value = basisPoints / 100
         return value > 0 && value < 0.1 ? "<0.1%" : String(format: "%.1f%%", value)
+    }
+}
+
+private struct UsageDaySelectionHost<Content: View>: View {
+    @State private var selectedDay: String?
+    let content: (Binding<String?>) -> Content
+
+    var body: some View { content($selectedDay) }
+}
+
+private struct UsageChartSelection: ViewModifier {
+    let selection: Binding<String?>?
+    let days: Set<String>
+
+    @ViewBuilder
+    func body(content: Content) -> some View {
+        if let selection {
+            content.chartOverlay { proxy in
+                GeometryReader { geometry in
+                    Color.clear.contentShape(Rectangle())
+                        .onContinuousHover { phase in
+                            guard case .active(let location) = phase,
+                                  let plotFrame = proxy.plotFrame else { return }
+                            let frame = geometry[plotFrame]
+                            guard frame.contains(location),
+                                  let date = proxy.value(atX: location.x - frame.minX, as: Date.self)
+                            else { return }
+                            let day = ProfileCalendar.key(date.addingTimeInterval(12 * 3_600))
+                            if days.contains(day), selection.wrappedValue != day {
+                                selection.wrappedValue = day
+                            }
+                        }
+                }
+            }
+        } else {
+            content
+        }
     }
 }
 

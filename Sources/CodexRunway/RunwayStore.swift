@@ -215,10 +215,10 @@ final class RunwayStore: ObservableObject {
         guard let activeAccountID,
               let account = accounts.first(where: { $0.id == activeAccountID }),
               let externalAccountID = account.externalAccountID else { return }
-        await refreshAnalytics(accountID: activeAccountID, externalAccountID: externalAccountID)
+        await refreshAnalytics(accountID: activeAccountID, externalAccountID: externalAccountID, forceChats: true)
     }
 
-    private func refreshAnalytics(accountID: UUID, externalAccountID: String) async {
+    private func refreshAnalytics(accountID: UUID, externalAccountID: String, forceChats: Bool = false) async {
         guard !isRefreshingAnalytics else { return }
         isRefreshingAnalytics = true
         analyticsRefreshError = nil
@@ -231,7 +231,7 @@ final class RunwayStore: ObservableObject {
         }
         let backfill = archive.lastBackfillAt.map { now.timeIntervalSince($0) >= 7 * 86_400 } ?? true
         do {
-            let fetchChats = archive.chatsFetchedAt.map { now.timeIntervalSince($0) >= 6 * 3_600 } ?? true
+            let fetchChats = forceChats || (archive.chatsFetchedAt.map { now.timeIntervalSince($0) >= 15 * 60 } ?? true)
             var threadError: String?
             var threads: [AnalyticsThreadSummary] = []
             if fetchChats {

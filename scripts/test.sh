@@ -10,6 +10,8 @@ swiftc -swift-version 6 -parse-as-library Sources/CodexRunway/ProfileModels.swif
 "$build_dir/analytics-checks"
 swiftc -swift-version 6 -parse-as-library Sources/CodexRunway/ProfileModels.swift Sources/CodexRunway/Models.swift Sources/CodexRunway/CapacityDemand.swift Sources/CodexRunway/CapacityForecast.swift Sources/CodexRunway/ForecastJournal.swift Sources/CodexRunway/CapacityDisplayLayout.swift scripts/CapacityChecks/main.swift -o "$build_dir/capacity-checks"
 "$build_dir/capacity-checks"
+swiftc -swift-version 6 -parse-as-library Sources/CodexRunway/CapacityHoverSelection.swift scripts/HoverChecks/main.swift -o "$build_dir/hover-checks"
+"$build_dir/hover-checks"
 swiftc -swift-version 6 -parse-as-library Sources/CodexRunway/ProfileModels.swift scripts/ProfileChecks/main.swift -o "$build_dir/profile-checks"
 "$build_dir/profile-checks"
 swiftc -swift-version 6 -parse-as-library Sources/CodexRunway/RunwayScroller.swift scripts/ScrollerChecks/main.swift -o "$build_dir/scroller-checks"
