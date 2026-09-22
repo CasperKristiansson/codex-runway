@@ -6,6 +6,9 @@ import AppKit
 final class RunwayStore: ObservableObject {
     @Published private(set) var accounts: [CodexAccount] = []
     @Published private(set) var activeAccountID: UUID?
+    @Published private(set) var analyticsByAccount: [UUID: AnalyticsArchive] = [:]
+    @Published private(set) var isRefreshingAnalytics = false
+    @Published var analyticsRefreshError: String?
     @Published var isRefreshing = false
     @Published var refreshError: String?
     @Published var profileRefreshError: String?
@@ -17,6 +20,9 @@ final class RunwayStore: ObservableObject {
     private var wakeObserver: NSObjectProtocol?
     private let defaults: UserDefaults
     private let forecastJournal: ForecastJournal
+    private let analyticsArchiveStore: AnalyticsArchiveStore
+    private let analyticsClient: AnalyticsClient
+    private let analyticsEnabled: Bool
     private(set) var forecastRecordingError: String?
     private let readAccount: @MainActor () async throws -> ActiveCodexAccount
     private let readProfile: @MainActor () async throws -> ActiveAccountProfile
@@ -24,6 +30,9 @@ final class RunwayStore: ObservableObject {
 
     init(defaults: UserDefaults = .standard,
          forecastJournal: ForecastJournal = ForecastJournal(),
+         analyticsArchiveStore: AnalyticsArchiveStore = AnalyticsArchiveStore(),
+         analyticsClient: AnalyticsClient = AnalyticsClient(),
+         analyticsEnabled: Bool = true,
          now: @escaping () -> Date = { .now },
          readProfile: @escaping @MainActor () async throws -> ActiveAccountProfile = {
              try await CodexAppServerClient().readActiveProfile()
@@ -32,10 +41,19 @@ final class RunwayStore: ObservableObject {
     }) {
         self.defaults = defaults
         self.forecastJournal = forecastJournal
+        self.analyticsArchiveStore = analyticsArchiveStore
+        self.analyticsClient = analyticsClient
+        self.analyticsEnabled = analyticsEnabled
         self.readAccount = readAccount
         self.readProfile = readProfile
         self.now = now
         load()
+        for account in accounts {
+            if let archive = try? analyticsArchiveStore.load(accountID: account.id),
+               archive.accountID == account.externalAccountID {
+                analyticsByAccount[account.id] = archive
+            }
+        }
     }
 
     func startAutomaticRefresh(interval: TimeInterval = 15 * 60) {
@@ -89,6 +107,11 @@ final class RunwayStore: ObservableObject {
         let removed = offsets.compactMap { accounts.indices.contains($0) ? accounts[$0].id : nil }
         accounts.remove(atOffsets: offsets)
         if let activeAccountID, removed.contains(activeAccountID) { self.activeAccountID = nil }
+        for id in removed {
+            analyticsByAccount.removeValue(forKey: id)
+            do { try analyticsArchiveStore.remove(accountID: id) }
+            catch { NSLog("Codex Runway analytics removal failed: %@", error.localizedDescription) }
+        }
         save()
     }
 
@@ -176,11 +199,58 @@ final class RunwayStore: ObservableObject {
                 NSLog("Codex Runway forecast recording failed: %@", error.localizedDescription)
             }
             await refreshProfileIfNeeded(accountID: accounts[index].id, force: forceProfile)
+            if analyticsEnabled, let externalAccountID = accounts[index].externalAccountID {
+                let accountID = accounts[index].id
+                Task { await self.refreshAnalytics(accountID: accountID, externalAccountID: externalAccountID) }
+            }
             return true
         } catch {
             activeAccountID = nil
             if presentFailure { refreshError = error.localizedDescription }
             return false
+        }
+    }
+
+    func refreshAnalyticsForSignedInAccount() async {
+        guard let activeAccountID,
+              let account = accounts.first(where: { $0.id == activeAccountID }),
+              let externalAccountID = account.externalAccountID else { return }
+        await refreshAnalytics(accountID: activeAccountID, externalAccountID: externalAccountID)
+    }
+
+    private func refreshAnalytics(accountID: UUID, externalAccountID: String) async {
+        guard !isRefreshingAnalytics else { return }
+        isRefreshingAnalytics = true
+        analyticsRefreshError = nil
+        defer { isRefreshingAnalytics = false }
+        let now = self.now()
+        var archive = analyticsByAccount[accountID] ?? AnalyticsArchive(accountID: externalAccountID)
+        guard archive.accountID == externalAccountID else {
+            analyticsRefreshError = "Saved Analytics belong to a different account."
+            return
+        }
+        let backfill = archive.lastBackfillAt.map { now.timeIntervalSince($0) >= 7 * 86_400 } ?? true
+        do {
+            let fetchChats = archive.chatsFetchedAt.map { now.timeIntervalSince($0) >= 6 * 3_600 } ?? true
+            var threadError: String?
+            var threads: [AnalyticsThreadSummary] = []
+            if fetchChats {
+                do {
+                    threads = try await CodexAppServerClient().readAnalyticsThreads(
+                        since: (backfill || archive.chatsFetchedAt == nil)
+                            ? HistoryRetention.cutoff(now: now) : now.addingTimeInterval(-30 * 86_400))
+                } catch { threadError = "Top chats: \(error.localizedDescription)" }
+            }
+            var update = try await analyticsClient.fetch(accountID: externalAccountID, initial: backfill,
+                                                         threads: threads, now: now)
+            if let threadError { update.errors.append(threadError) }
+            guard accounts.contains(where: { $0.id == accountID && $0.externalAccountID == externalAccountID }) else { return }
+            archive.apply(update, now: now, wasBackfill: backfill)
+            try analyticsArchiveStore.save(archive, accountID: accountID)
+            analyticsByAccount[accountID] = archive
+            if !update.errors.isEmpty { analyticsRefreshError = update.errors.joined(separator: " · ") }
+        } catch {
+            analyticsRefreshError = error.localizedDescription
         }
     }
 

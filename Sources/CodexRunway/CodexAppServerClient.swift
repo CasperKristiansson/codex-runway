@@ -16,6 +16,11 @@ struct ActiveAccountProfile {
     let usage: ProfileUsageResponse
 }
 
+private struct AnalyticsThreadListResponse: Decodable {
+    let data: [AnalyticsThreadSummary]
+    let nextCursor: String?
+}
+
 struct AccountReadResponse: Decodable, Equatable {
     let account: ChatGPTAccount?
 }
@@ -104,6 +109,36 @@ actor CodexAppServerClient {
             identity: try JSONDecoder().decode(AccountReadResponse.self, from: accountData),
             rateLimits: try JSONDecoder().decode(RateLimitsReadResponse.self, from: rateLimitData)
         )
+    }
+
+    /// Reads task metadata from the local App Server. The Analytics backend
+    /// decides which of these task IDs have usage for the active account.
+    func readAnalyticsThreads(since: Date, limit: Int = 600, executablePath: String? = nil) async throws -> [AnalyticsThreadSummary] {
+        try start(executablePath: executablePath)
+        defer { stop() }
+        _ = try await request(method: "initialize", params: [
+            "clientInfo": ["name": "codex-runway", "version": "0.1.0"]
+        ])
+        notify(method: "initialized")
+        var result: [AnalyticsThreadSummary] = []
+        for archived in [false, true] {
+            var cursor: String?
+            repeat {
+                var params: [String: Any] = [
+                    "limit": 100, "sortKey": "updated_at", "sortDirection": "desc",
+                    "sourceKinds": [], "modelProviders": [], "archived": archived,
+                    "useStateDbOnly": true
+                ]
+                if let cursor { params["cursor"] = cursor }
+                let response = try JSONDecoder().decode(AnalyticsThreadListResponse.self,
+                    from: await request(method: "thread/list", params: params))
+                let recent = response.data.filter { ($0.activityTimestamp ?? 0) >= since.timeIntervalSince1970 }
+                result.append(contentsOf: recent)
+                cursor = recent.count == response.data.count ? response.nextCursor : nil
+            } while cursor != nil && result.count < limit
+            if result.count >= limit { break }
+        }
+        return Array(result.prefix(limit))
     }
 
     private func start(executablePath: String?) throws {

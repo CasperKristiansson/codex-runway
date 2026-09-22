@@ -4,8 +4,10 @@ set -euo pipefail
 build_dir="$(mktemp -d /private/tmp/codex-runway-checks.XXXXXX)"
 trap 'rm -rf "$build_dir"' EXIT
 
-swiftc -swift-version 6 -parse-as-library Sources/CodexRunway/ProfileModels.swift Sources/CodexRunway/Models.swift Sources/CodexRunway/CapacityDemand.swift Sources/CodexRunway/CapacityForecast.swift Sources/CodexRunway/ForecastJournal.swift Sources/CodexRunway/CodexAppServerClient.swift Sources/CodexRunway/RunwayStore.swift scripts/StatusChecks/main.swift -o "$build_dir/status-checks"
+swiftc -swift-version 6 -parse-as-library Sources/CodexRunway/ProfileModels.swift Sources/CodexRunway/Models.swift Sources/CodexRunway/CapacityDemand.swift Sources/CodexRunway/CapacityForecast.swift Sources/CodexRunway/ForecastJournal.swift Sources/CodexRunway/AnalyticsModels.swift Sources/CodexRunway/AnalyticsArchiveStore.swift Sources/CodexRunway/AnalyticsClient.swift Sources/CodexRunway/CodexAppServerClient.swift Sources/CodexRunway/RunwayStore.swift scripts/StatusChecks/main.swift -o "$build_dir/status-checks"
 "$build_dir/status-checks"
+swiftc -swift-version 6 -parse-as-library Sources/CodexRunway/ProfileModels.swift Sources/CodexRunway/AnalyticsModels.swift Sources/CodexRunway/AnalyticsArchiveStore.swift Sources/CodexRunway/AnalyticsClient.swift scripts/AnalyticsChecks/main.swift -o "$build_dir/analytics-checks"
+"$build_dir/analytics-checks"
 swiftc -swift-version 6 -parse-as-library Sources/CodexRunway/ProfileModels.swift Sources/CodexRunway/Models.swift Sources/CodexRunway/CapacityDemand.swift Sources/CodexRunway/CapacityForecast.swift Sources/CodexRunway/ForecastJournal.swift Sources/CodexRunway/CapacityDisplayLayout.swift scripts/CapacityChecks/main.swift -o "$build_dir/capacity-checks"
 "$build_dir/capacity-checks"
 swiftc -swift-version 6 -parse-as-library Sources/CodexRunway/ProfileModels.swift scripts/ProfileChecks/main.swift -o "$build_dir/profile-checks"

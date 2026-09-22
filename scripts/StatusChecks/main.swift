@@ -44,7 +44,7 @@ struct StatusChecks {
         let journalDirectory = FileManager.default.temporaryDirectory.appendingPathComponent("runway-journal-\(UUID().uuidString)")
         defer { try? FileManager.default.removeItem(at: journalDirectory) }
         let fixture = RefreshFixture()
-        let store = RunwayStore(defaults: defaults, forecastJournal: ForecastJournal(directory: journalDirectory), now: { fixture.time }, readProfile: {
+        let store = RunwayStore(defaults: defaults, forecastJournal: ForecastJournal(directory: journalDirectory), analyticsEnabled: false, now: { fixture.time }, readProfile: {
             fixture.profileCalls += 1
             if fixture.profileShouldFail { throw CodexAppServerError.invalidResponse }
             return ActiveAccountProfile(

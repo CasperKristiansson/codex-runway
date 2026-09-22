@@ -30,14 +30,17 @@ struct SettingsView: View {
             Picker("Panel", selection: $navigation.tab) {
                 Text("Settings").tag(0)
                 Text("History").tag(1)
+                Text("Analytics").tag(2)
             }
             .pickerStyle(.segmented)
             .labelsHidden()
-            .frame(width: 240)
+            .frame(width: 340)
             .padding(.top, 20)
             .padding(.bottom, 16)
             Divider()
-            if navigation.tab == 0 { accountSettings } else { ProfileView(selection: $navigation.selectedAccountID) }
+            if navigation.tab == 0 { accountSettings }
+            else if navigation.tab == 1 { ProfileView(selection: $navigation.selectedAccountID) }
+            else { AnalyticsView(selection: $navigation.selectedAccountID) }
         }
         .frame(width: 840, height: 620)
         .background(Color.white)
