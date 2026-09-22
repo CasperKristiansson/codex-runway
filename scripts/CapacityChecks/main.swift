@@ -6,7 +6,7 @@ struct CapacityChecks {
         precondition(abs(actual - expected) < 0.00001, "Expected \(expected), got \(actual)")
     }
 
-    static func main() {
+    static func main() throws {
         precondition(CapacityDisplayLayout.rowsHeight == 7 * CapacityDisplayLayout.rowHeight)
         precondition(CapacityDisplayLayout.height == CapacityDisplayLayout.headerHeight + 8 +
             CapacityDisplayLayout.rowsHeight)
@@ -259,6 +259,90 @@ struct CapacityChecks {
         let retained = CapacityForecast.retainedSnapshots(many, now: now)
         precondition(retained.count == 35041)
         precondition(retained.first!.capturedAt == now.addingTimeInterval(-365 * 86_400))
-        print("Capacity checks passed: weighting, resets, depletion, pace, freshness, and one-year retention")
+        // Day/night timing changes hourly demand without inventing extra daily usage.
+        let midnight = utc.date(from: DateComponents(year: 2026, month: 9, day: 20))!
+        let observed = (0..<72).map { hour in
+            CapacityConsumption(accountIndex: 0, start: midnight.addingTimeInterval(Double(hour) * 3_600),
+                end: midnight.addingTimeInterval(Double(hour + 1) * 3_600),
+                units: hour % 24 < 6 ? 0.01 : 0.1)
+        }
+        let learned = CapacityDemand.learnHourlyFactors(observed, calendar: utc)!
+        precondition(learned[2] < learned[14])
+        close(learned.reduce(0, +), 24)
+        // Duplicating concurrent observations doubles consumption and its prior,
+        // but cannot double exposure or change the learned daily shape.
+        let concurrent = CapacityDemand.learnHourlyFactors(observed + observed, calendar: utc)!
+        for hour in 0..<24 { close(learned[hour], concurrent[hour]) }
+        precondition(CapacityDemand.learnHourlyFactors(Array(observed.prefix(24)), calendar: utc) == nil)
+        precondition(CapacityDemand.learnHourlyFactors([
+            CapacityConsumption(accountIndex: 0, start: midnight, end: midnight.addingTimeInterval(72 * 3_600), units: 10)
+        ], calendar: utc) == nil, "Long gaps cannot teach hourly timing")
+        let learnedDemand = CapacityDemand(ratePerHour: 0.2, hourlyFactors: learned, calendar: utc)
+        close(learnedDemand.units(from: midnight.addingTimeInterval(1234),
+            to: midnight.addingTimeInterval(1234 + 86_400)), 4.8)
+        let factors = (0..<24).map { $0 < 12 ? 0.0 : 2.0 }
+        let shapedSnapshot = UsageSnapshot(capturedAt: midnight, usedPercent: 75,
+            resetAt: midnight.addingTimeInterval(15 * 3_600))
+        let shapedAccount = CodexAccount(name: "Daytime", planName: "Pro 20×", snapshots: [shapedSnapshot])
+        let shaped = CapacityForecast.simulate(accounts: [shapedAccount], snapshots: [shapedSnapshot],
+            ratePerHour: 1, now: midnight, hourlyFactors: factors, calendar: utc)
+        close(shaped.exhaustedAt!.timeIntervalSince(midnight), 12.5 * 3_600)
+        close(shaped.shortfallUnits!, 5)
+        close(shaped.resets[0].before, 0)
+        close(shaped.resets[0].after, 4)
+        close(CapacityForecast.value(at: midnight.addingTimeInterval(6 * 3_600), in: shaped.points)!, 1)
+        let exactlyAtReset = UsageSnapshot(capturedAt: midnight, usedPercent: 75,
+            resetAt: midnight.addingTimeInterval(12.5 * 3_600))
+        let shapedExact = CapacityForecast.simulate(accounts: [shapedAccount], snapshots: [exactlyAtReset],
+            ratePerHour: 1, now: midnight, hourlyFactors: factors, calendar: utc)
+        precondition(shapedExact.exhaustedAt == nil)
+        let unknownReset = UsageSnapshot(capturedAt: midnight.addingTimeInterval(-3_600), usedPercent: 100, resetAt: midnight)
+        let shapedUnknown = CapacityForecast.simulate(accounts: [shapedAccount], snapshots: [unknownReset],
+            ratePerHour: 1, now: midnight, hourlyFactors: factors, calendar: utc)
+        close(shapedUnknown.exhaustedAt!.timeIntervalSince(midnight), 14 * 3_600)
+        close(shapedUnknown.shortfallUnits!, 44)
+        precondition(shapedUnknown.resets.isEmpty)
+
+        var stockholm = utc
+        stockholm.timeZone = TimeZone(identifier: "Europe/Stockholm")!
+        for (month, date, expectedHours) in [(3, 29, 23.0), (10, 25, 25.0)] {
+            let start = stockholm.date(from: DateComponents(year: 2026, month: month, day: date))!
+            let end = stockholm.date(byAdding: .day, value: 1, to: start)!
+            let clock = CapacityDemand(ratePerHour: 1, calendar: stockholm)
+            close(clock.units(from: start, to: end), expectedHours)
+            let parts = clock.segments(from: start, to: end)
+            precondition(parts.count == Int(expectedHours))
+            precondition(zip(parts, parts.dropFirst()).allSatisfy { $0.end == $1.start })
+            if month == 10 {
+                precondition(parts.filter { stockholm.component(.hour, from: $0.start) == 2 }.count == 2)
+            }
+        }
+        let journalDirectory = FileManager.default.temporaryDirectory.appendingPathComponent("runway-forecast-check-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: journalDirectory) }
+        let journal = ForecastJournal(directory: journalDirectory)
+        let recorded = try journal.record(accounts: [tracked], now: now, calendar: utc)
+        precondition(recorded)
+        let recordFile = try FileManager.default.contentsOfDirectory(at: journalDirectory, includingPropertiesForKeys: nil).first!
+        let originalRecord = try Data(contentsOf: recordFile)
+        let decoded = try JSONDecoder().decode(ForecastJournal.Record.self, from: originalRecord)
+        precondition(decoded.schemaVersion == 1 && decoded.origin == now)
+        precondition(decoded.accounts[0].snapshot == tracked.latestSnapshot!)
+        precondition(Set(decoded.candidates.map(\.model)) == ["calendar-v1", "clock-v1", "clock-recent-v1"])
+        precondition(decoded.candidates.allSatisfy { $0.predictions.map(\.horizonHours) == [3, 6, 12, 24, 48] })
+        precondition(!String(data: originalRecord, encoding: .utf8)!.contains(tracked.name))
+        let repeated = try journal.record(accounts: [tracked], now: now.addingTimeInterval(1), calendar: utc)
+        precondition(!repeated)
+        let unchangedRecord = try Data(contentsOf: recordFile)
+        precondition(unchangedRecord == originalRecord, "Forecast origins must remain immutable")
+        let expired = journalDirectory.appendingPathComponent("forecast-0.json")
+        let unrelated = journalDirectory.appendingPathComponent("notes.json")
+        try Data().write(to: expired)
+        try Data().write(to: unrelated)
+        let nextOrigin = try journal.record(accounts: [tracked], now: now.addingTimeInterval(6 * 3_600), calendar: utc)
+        precondition(nextOrigin && !FileManager.default.fileExists(atPath: expired.path))
+        precondition(FileManager.default.fileExists(atPath: unrelated.path))
+        let noForecast = try journal.record(accounts: [missing], now: now.addingTimeInterval(12 * 3_600), calendar: utc)
+        precondition(!noForecast)
+        print("Capacity checks passed: weighting, resets, depletion, pace, hourly learning, DST, freshness, and one-year retention")
     }
 }

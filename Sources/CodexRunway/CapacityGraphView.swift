@@ -74,6 +74,9 @@ struct CapacityGraphView: View {
                         .font(.caption)
                         .foregroundStyle(.secondary)
                         .lineLimit(1)
+                        .help(report.usesTimeOfDay
+                            ? "Forecast follows your observed time-of-day pattern. The daily average is unchanged; saved balances and reset assumptions still apply."
+                            : "Forecast uses a steady average while learning your time-of-day pattern.")
                 }
                 HStack(spacing: 6) {
                     Text("View")
@@ -289,9 +292,8 @@ struct CapacityGraphView: View {
 
     private func averageLabel(_ report: CapacityReport) -> String {
         let hours = report.averageHistoryHours ?? 0
-        if hours >= 719 { return "30-day average" }
-        let history = hours >= 24 ? String(format: "%.1fd", hours / 24) : String(format: "%.0fh", hours)
-        return "\(history) average"
+        let history = hours >= 719 ? "30d" : hours >= 24 ? String(format: "%.1fd", hours / 24) : String(format: "%.0fh", hours)
+        return "\(history) avg" + (report.usesTimeOfDay ? " · daily pattern" : "")
     }
 
     private func exhaustionWarning(_ exhaustion: Date, projection: CapacitySimulation, showsPercent: Bool) -> String {

@@ -16,11 +16,14 @@ final class RunwayStore: ObservableObject {
     private var refreshTimer: Timer?
     private var wakeObserver: NSObjectProtocol?
     private let defaults: UserDefaults
+    private let forecastJournal: ForecastJournal
+    private(set) var forecastRecordingError: String?
     private let readAccount: @MainActor () async throws -> ActiveCodexAccount
     private let readProfile: @MainActor () async throws -> ActiveAccountProfile
     private let now: () -> Date
 
     init(defaults: UserDefaults = .standard,
+         forecastJournal: ForecastJournal = ForecastJournal(),
          now: @escaping () -> Date = { .now },
          readProfile: @escaping @MainActor () async throws -> ActiveAccountProfile = {
              try await CodexAppServerClient().readActiveProfile()
@@ -28,6 +31,7 @@ final class RunwayStore: ObservableObject {
         try await CodexAppServerClient().readActiveAccount()
     }) {
         self.defaults = defaults
+        self.forecastJournal = forecastJournal
         self.readAccount = readAccount
         self.readProfile = readProfile
         self.now = now
@@ -132,6 +136,7 @@ final class RunwayStore: ObservableObject {
             }
             let index = resolveOrCreateAccount(for: response)
             var snapshot = UsageSnapshot(
+                capturedAt: now(),
                 usedPercent: response.rateLimits.rateLimits.primary.usedPercent,
                 resetAt: Date(timeIntervalSince1970: primaryReset),
                 bankedResetCount: response.rateLimits.rateLimitResetCredits?.availableCount ?? 0
@@ -161,6 +166,15 @@ final class RunwayStore: ObservableObject {
             }
             activeAccountID = accounts[index].id
             save()
+            do {
+                try forecastJournal.record(accounts: accounts, now: snapshot.capturedAt)
+                forecastRecordingError = nil
+            } catch {
+                // A diagnostic write failure must not discard a successful quota
+                // refresh or change the displayed forecast.
+                forecastRecordingError = error.localizedDescription
+                NSLog("Codex Runway forecast recording failed: %@", error.localizedDescription)
+            }
             await refreshProfileIfNeeded(accountID: accounts[index].id, force: forceProfile)
             return true
         } catch {

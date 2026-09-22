@@ -1,3 +1,12 @@
 .build/
 dist/
 .DS_Store
+
+# Private usage exports, research results, and local reports
+/research/forecast/local/
+/research/forecast/*.json
+/research/forecast/*.svg
+/research/forecast/REPORT.md
+/research/forecast/IMPLEMENTATION.md
+__pycache__/
+*.py[cod]

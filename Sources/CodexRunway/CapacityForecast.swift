@@ -50,6 +50,9 @@ struct CapacityReport {
     var projection: CapacitySimulation?
     var ratePerHour: Double?
     var averageHistoryHours: Double?
+    var demand: CapacityDemand?
+    var usesTimeOfDay = false
+    var shadowDemands: [String: CapacityDemand] = [:]
     var horizon: Date
     var issue: String?
     var hasStaleReadings = false
@@ -121,7 +124,7 @@ enum CapacityForecast {
         return result
     }
 
-    static func report(accounts: [CodexAccount], now: Date = .now) -> CapacityReport {
+    static func report(accounts: [CodexAccount], now: Date = .now, calendar: Calendar = .current) -> CapacityReport {
         let accounts = accounts.filter(\.isEnabled)
         var result = CapacityReport(horizon: now.addingTimeInterval(day))
         guard !accounts.isEmpty else {
@@ -223,108 +226,102 @@ enum CapacityForecast {
             return result
         }
 
-        // Average calendar-time consumption over the retained thirty days.
-        // Same-window gaps include nights and idle time; reset/plan-change
-        // intervals are excluded because their consumption is unobserved.
+        let observations = CapacityDemand.observations(accounts: accounts, snapshots: ordered)
         let cutoff = now.addingTimeInterval(-30 * day)
         var totalConsumed = 0.0
         var sharedStart = now
-        for (index, snapshots) in ordered.enumerated() {
-            var consumed = 0.0
+        for index in accounts.indices {
             var coveredSeconds = 0.0
-            for (older, newer) in zip(snapshots, snapshots.dropFirst()) {
-                let seconds = newer.capturedAt.timeIntervalSince(older.capturedAt)
-                let intervalStart = max(cutoff, older.capturedAt)
-                let overlap = newer.capturedAt.timeIntervalSince(intervalStart)
-                let weight = newer.capacityUnits ?? accounts[index].capacityUnits!
-                guard seconds > 0, overlap > 0,
-                      older.resetAt > newer.capturedAt,
-                      abs(older.resetAt.timeIntervalSince(newer.resetAt)) < 60,
-                      (older.capacityUnits ?? accounts[index].capacityUnits!) == weight,
-                      newer.usedPercent >= older.usedPercent else { continue }
-                // Interpolate only the part inside the thirty-day lookback.
-                consumed += max(0, remaining(older, weight: weight) - remaining(newer, weight: weight)) * overlap / seconds
+            for observation in observations where observation.accountIndex == index {
+                let intervalStart = max(cutoff, observation.start)
+                let overlap = observation.end.timeIntervalSince(intervalStart)
+                guard overlap > 0 else { continue }
+                totalConsumed += observation.units(from: intervalStart, to: observation.end)
                 coveredSeconds += overlap
                 sharedStart = min(sharedStart, intervalStart)
             }
-            let hours = coveredSeconds / 3_600
-            guard hours >= 2 else {
+            guard coveredSeconds >= 2 * 3_600 else {
                 result.issue = "Learning the usage average · needs at least 2h of history for each account."
                 return result
             }
-            totalConsumed += consumed
         }
-        // Divide once by a shared calendar window. Adding separately annualized
-        // account rates would treat sequential account use as concurrent use.
-        // Gaps count as elapsed time; unseen consumption is not fabricated.
+        // Keep the tested shared-calendar level. The learned curve changes when
+        // demand arrives, conserving the total over an ordinary 24-hour day.
         let sharedHours = now.timeIntervalSince(sharedStart) / 3_600
         let rate = totalConsumed / sharedHours
         result.averageHistoryHours = sharedHours
         result.ratePerHour = rate
-        let projection = simulate(accounts: accounts, snapshots: latest, ratePerHour: rate, now: now)
+        let factors = CapacityDemand.learnHourlyFactors(observations, calendar: calendar)
+        let demand = CapacityDemand(ratePerHour: rate, hourlyFactors: factors, calendar: calendar)
+        result.demand = demand
+        result.usesTimeOfDay = factors != nil
+        result.shadowDemands["calendar-v1"] = CapacityDemand(ratePerHour: rate, calendar: calendar)
+        // Recent pace stays in shadow until prospective quota evidence supports
+        // changing the daily total. Do not infer quota cost from token counts.
+        let recentStart = max(sharedStart, now.addingTimeInterval(-72 * 3_600))
+        let recentRate = observations.reduce(0) { $0 + $1.units(from: recentStart, to: now) }
+            / (now.timeIntervalSince(recentStart) / 3_600)
+        result.shadowDemands["clock-recent-v1"] = CapacityDemand(ratePerHour: (rate + recentRate) / 2,
+            hourlyFactors: factors, calendar: calendar)
+        let projection = simulate(accounts: accounts, snapshots: latest, ratePerHour: rate, now: now,
+            hourlyFactors: factors, calendar: calendar)
         result.projection = projection
         result.resets.removeAll { !$0.hasEstimate }
         result.resets += projection.resets
         return result
     }
 
-    static func simulate(accounts: [CodexAccount], snapshots: [UsageSnapshot], ratePerHour: Double, now: Date) -> CapacitySimulation {
+    static func simulate(accounts: [CodexAccount], snapshots: [UsageSnapshot], ratePerHour: Double, now: Date,
+                         hourlyFactors: [Double]? = nil, calendar: Calendar = .current) -> CapacitySimulation {
         var balances = zip(accounts, snapshots).map { $0.0.capacityUnits! * $0.1.remainingPercent(at: now) / 100 }
-        var pending = accounts.indices.filter { snapshots[$0].nextReset(at: now) != nil }.sorted { snapshots[$0].resetAt < snapshots[$1].resetAt }
+        var pending = accounts.indices.filter { snapshots[$0].nextReset(at: now) != nil }
+            .sorted { snapshots[$0].resetAt < snapshots[$1].resetAt }
+        let horizon = pending.last.map { snapshots[$0].resetAt } ?? now.addingTimeInterval(2 * day)
+        let demand = CapacityDemand(ratePerHour: ratePerHour, hourlyFactors: hourlyFactors, calendar: calendar)
         var result = CapacitySimulation()
         var date = now
         result.minimum = balances.reduce(0, +)
         result.points.append(CapacityPoint(date: now, units: result.minimum, segment: 0))
-        if pending.isEmpty {
-            // All next reset dates are unknown. Show a bounded two-day burn
-            // estimate without inventing another refill or a repeating cycle.
-            let horizon = now.addingTimeInterval(2 * day)
-            let total = result.minimum
-            if ratePerHour > 0 && ratePerHour * 48 > total {
-                let exhaustion = now.addingTimeInterval(total / ratePerHour * 3_600)
-                result.exhaustedAt = exhaustion
-                result.shortfallUnits = ratePerHour * 48 - total
-                result.shortfallAt = horizon
-                result.points.append(CapacityPoint(date: exhaustion, units: 0, segment: 0))
-            }
-            result.minimum = max(0, total - ratePerHour * 48)
-            result.points.append(CapacityPoint(date: horizon, units: result.minimum, segment: 0))
-        }
-        while let next = pending.first {
-            let resetAt = snapshots[next].resetAt
-            let hours = max(0, resetAt.timeIntervalSince(date) / 3_600)
-            let total = balances.reduce(0, +)
-            var demand = ratePerHour * hours
-            if demand > total + 0.000000001 && ratePerHour > 0 {
-                let exhaustion = date.addingTimeInterval(total / ratePerHour * 3_600)
-                if result.exhaustedAt == nil {
-                    result.exhaustedAt = exhaustion
-                    result.shortfallUnits = demand - total
-                    result.shortfallAt = resetAt
-                }
-                result.points.append(CapacityPoint(date: exhaustion, units: 0, segment: 0))
-            }
-            // Spend the soonest-resetting allowance first, preserving accounts
-            // that have already refilled for the later intervals.
+        while date < horizon {
+            let boundary = pending.first.map { snapshots[$0].resetAt } ?? horizon
+            let parts = demand.segments(from: date, to: boundary)
+            let intervalDemand = parts.reduce(0) { $0 + $1.units }
+            let initialBalance = balances.reduce(0, +)
+            // Keep nearest-reset-first allocation across all hourly steps.
             let spendOrder = pending + accounts.indices.filter { !pending.contains($0) }
-            for index in spendOrder {
-                let spend = min(balances[index], demand)
-                balances[index] -= spend
-                demand -= spend
+            for part in parts {
+                let available = balances.reduce(0, +)
+                if part.units > available + 0.000000001 && part.rate > 0 && result.exhaustedAt == nil {
+                    let exhaustion = part.start.addingTimeInterval(available / part.rate * 3_600)
+                    result.exhaustedAt = exhaustion
+                    // The deficit is for the entire interval up to the reset,
+                    // not just the hour in which the account pool runs out.
+                    result.shortfallUnits = max(0, intervalDemand - initialBalance)
+                    result.shortfallAt = boundary
+                    result.points.append(CapacityPoint(date: exhaustion, units: 0, segment: 0))
+                }
+                var remainingDemand = part.units
+                for index in spendOrder {
+                    let spend = min(balances[index], remainingDemand)
+                    balances[index] -= spend
+                    remainingDemand -= spend
+                }
+                let total = balances.reduce(0, +)
+                result.minimum = min(result.minimum, total)
+                result.points.append(CapacityPoint(date: part.end, units: total, segment: 0))
             }
-            let before = balances.reduce(0, +)
-            result.minimum = min(result.minimum, before)
-            result.points.append(CapacityPoint(date: resetAt, units: before, segment: 0))
-            let simultaneous = pending.filter { snapshots[$0].resetAt == resetAt }
+            let simultaneous = pending.filter { snapshots[$0].resetAt == boundary }
             for index in simultaneous {
-                let prior = balances.reduce(0, +)
+                let before = balances.reduce(0, +)
                 balances[index] = accounts[index].capacityUnits!
-                result.resets.append(CapacityReset(date: resetAt, accountName: accounts[index].name,
-                    before: prior, after: balances.reduce(0, +), projected: true))
+                result.resets.append(CapacityReset(date: boundary, accountName: accounts[index].name,
+                    before: before, after: balances.reduce(0, +), projected: true))
             }
             pending.removeAll { simultaneous.contains($0) }
-            result.points.append(CapacityPoint(date: resetAt, units: balances.reduce(0, +), segment: 0))
-            date = resetAt
+            if !simultaneous.isEmpty {
+                result.points.append(CapacityPoint(date: boundary, units: balances.reduce(0, +), segment: 0))
+            }
+            date = boundary
         }
         return result
     }
