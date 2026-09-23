@@ -1,5 +1,6 @@
 import Charts
 import SwiftUI
+import AppKit
 
 private enum AnalyticsRange: Int, CaseIterable, Identifiable {
     case week = 7, month = 30, year = 365
@@ -22,10 +23,16 @@ private struct AnalyticsSeries {
     let maximum: Double
 }
 
+private struct AnalyticsChatDisplayRow: Identifiable {
+    let accountName: String
+    let chat: AnalyticsChat
+    var id: String { chat.threadID }
+}
+
 struct AnalyticsView: View {
     @EnvironmentObject private var store: RunwayStore
     @Binding var selection: UUID?
-    @State private var usageRange: AnalyticsRange = .week
+    @State private var usageRange: AnalyticsRange = .month
     @State private var toolRange: AnalyticsRange = .week
     @State private var messageRange: AnalyticsRange = .week
     @State private var usageGroup = "Feature"
@@ -133,6 +140,7 @@ struct AnalyticsView: View {
         let chartDays = days(for: usageRange)
         let selectableDays = Set(chartDays)
         let buckets = usageBuckets(days: chartDays)
+        let periodTotals = AnalyticsUsageBreakdown.totals(buckets)
         let series = makeSeries(buckets, days: chartDays, limit: 5)
         return VStack(alignment: .leading, spacing: 12) {
             sectionHeader("Usage history", subtitle: "Plan usage by day, feature, model, or surface") {
@@ -145,8 +153,7 @@ struct AnalyticsView: View {
                 .labelsHidden().frame(width: 140)
             }
             UsageDaySelectionHost { daySelection in
-                let selectedDay = daySelection.wrappedValue.flatMap { chartDays.contains($0) ? $0 : nil }
-                    ?? chartDays.last ?? ""
+                let selectedDay = daySelection.wrappedValue.flatMap { selectableDays.contains($0) ? $0 : nil }
                 return VStack(alignment: .leading, spacing: 14) {
                     if selectedAccount == nil {
                         Text("Combined percentage is weighted by each saved account's plan capacity.")
@@ -154,9 +161,10 @@ struct AnalyticsView: View {
                     }
                     analyticsChart(series, kind: .bar, title: "Plan usage", unit: "% of limit", showsTotal: false,
                                    selection: daySelection, selectedDay: selectedDay, selectionDays: selectableDays)
-                    Text("\(selectedDay) breakdown")
+                    Text(selectedDay.map { "\($0) · share of that day's usage" }
+                         ?? "\(usageRange.label) total · share of period usage")
                         .font(.system(size: 11)).foregroundStyle(.secondary)
-                    categorySummary(buckets[selectedDay] ?? [:])
+                    categorySummary(selectedDay.flatMap { buckets[$0] } ?? periodTotals)
                 }
             }
             .padding(18)
@@ -209,9 +217,9 @@ struct AnalyticsView: View {
             "Compare each saved task's plan and credit usage · Synced \($0.formatted(date: .abbreviated, time: .shortened))"
         } ?? "Compare each saved task's plan and credit usage"
         let rows = saved.flatMap { account, archive in
-            archive.chats.map { (account.name, $0) }
-        }.filter { $0.1.weeklyLimitPercent != nil }
-            .sorted { ($0.1.weeklyLimitPercent ?? 0) > ($1.1.weeklyLimitPercent ?? 0) }
+            archive.chats.map { AnalyticsChatDisplayRow(accountName: account.name, chat: $0) }
+        }.filter { $0.chat.weeklyLimitPercent != nil }
+            .sorted { ($0.chat.weeklyLimitPercent ?? 0) > ($1.chat.weeklyLimitPercent ?? 0) }
         let displayed = showsAllChats ? rows : Array(rows.prefix(5))
         return VStack(alignment: .leading, spacing: 12) {
             sectionHeader("Top chats", subtitle: subtitle) { EmptyView() }
@@ -228,8 +236,9 @@ struct AnalyticsView: View {
                 if displayed.isEmpty {
                     Text("No task-level usage saved yet").foregroundStyle(.secondary).padding(18)
                 }
-                ForEach(Array(displayed.enumerated()), id: \.offset) { _, item in
-                    chatRow(accountName: item.0, chat: item.1)
+                ForEach(displayed) { item in
+                    AnalyticsChatRow(accountName: item.accountName, chat: item.chat,
+                                     showsAccountName: selectedAccount == nil)
                     Divider()
                 }
             }
@@ -242,41 +251,6 @@ struct AnalyticsView: View {
                     .background(Color(white: 0.96), in: Capsule())
             }
         }
-    }
-
-    private func chatRow(accountName: String, chat: AnalyticsChat) -> some View {
-        DisclosureGroup {
-            VStack(alignment: .leading, spacing: 7) {
-                if let value = chat.fiveHourLimitPercent {
-                    HStack { Text("Five-hour limit"); Spacer(); Text(String(format: "%.2f%%", value)) }
-                }
-                ForEach(Array(chat.groups.enumerated()), id: \.offset) { _, item in
-                    if let group = item.object {
-                        HStack {
-                            Text(group["model"]?.string ?? "Other")
-                            Spacer()
-                            Text(group["weekly_limit_percent"]?.number.map { String(format: "%.2f%%", $0) } ?? "—")
-                        }
-                    }
-                }
-                Text(chat.dataStatus.capitalized + " data")
-                    .foregroundStyle(.secondary)
-            }
-            .font(.system(size: 11))
-            .padding(.vertical, 8)
-        } label: {
-            HStack(spacing: 8) {
-                Text(chat.title).lineLimit(1)
-                if selectedAccount == nil { Text(accountName).foregroundStyle(.secondary).lineLimit(1) }
-                Spacer(minLength: 8)
-                Text(chat.weeklyLimitPercent.map { String(format: "%.2f%%", $0) } ?? "—")
-                    .frame(width: 120, alignment: .trailing)
-                Text(chat.balanceUsageCredits.flatMap(Double.init).map { String(format: "%.2f", $0) } ?? "—")
-                    .frame(width: 90, alignment: .trailing)
-            }
-            .font(.system(size: 12))
-        }
-        .padding(.horizontal, 16).padding(.vertical, 10)
     }
 
     private func planRow(accountName: String, period: AnalyticsPlanPeriod) -> some View {
@@ -388,7 +362,7 @@ struct AnalyticsView: View {
             }
             .chartForegroundStyleScale(domain: series.categories.map(\.name),
                                        range: Array(series.categories.enumerated()).map {
-                                           chartColor($0.element.name, index: $0.offset, selectedDay: selectedDay)
+                                           chartColor($0.element.name, index: $0.offset, isUsageChart: selection != nil)
                                        })
             .chartLegend(.hidden)
             .chartXScale(range: .plotDimension(startPadding: 25, endPadding: 50))
@@ -399,7 +373,7 @@ struct AnalyticsView: View {
             HStack(spacing: 14) {
                 ForEach(Array(series.categories.enumerated()), id: \.offset) { index, category in
                     HStack(spacing: 4) {
-                        Circle().fill(chartColor(category.name, index: index, selectedDay: selectedDay))
+                        Circle().fill(chartColor(category.name, index: index, isUsageChart: selection != nil))
                             .frame(width: 8, height: 8)
                         Text(category.name).lineLimit(1)
                     }
@@ -410,18 +384,17 @@ struct AnalyticsView: View {
     }
 
     private func categorySummary(_ values: [String: Double]) -> some View {
-        let total = values.values.reduce(0, +)
         let categories = values.filter { $0.value > 0 }
             .sorted { $0.value > $1.value }
             .prefix(6)
         return LazyVGrid(columns: Array(repeating: GridItem(.flexible(), alignment: .leading), count: 3), spacing: 12) {
             ForEach(Array(categories.enumerated()), id: \.offset) { index, category in
                 HStack(alignment: .top, spacing: 7) {
-                    RoundedRectangle(cornerRadius: 2).fill(chartColor(category.key, index: index, selectedDay: "usage"))
+                    RoundedRectangle(cornerRadius: 2).fill(chartColor(category.key, index: index, isUsageChart: true))
                         .frame(width: 3, height: 38)
                     VStack(alignment: .leading, spacing: 2) {
                         Text(category.key).font(.system(size: 11)).lineLimit(1)
-                        Text(total > 0 ? String(format: "%.1f%%", category.value / total * 100) : "0%")
+                        Text(String(format: "%.1f%%", AnalyticsUsageBreakdown.share(of: category.value, in: values)))
                             .font(.system(size: 15))
                     }
                 }
@@ -528,8 +501,8 @@ struct AnalyticsView: View {
         }
     }
 
-    private func chartColor(_ name: String, index: Int, selectedDay: String?) -> Color {
-        guard selectedDay != nil && usageGroup == "Feature" else { return colors[index % colors.count] }
+    private func chartColor(_ name: String, index: Int, isUsageChart: Bool) -> Color {
+        guard isUsageChart && usageGroup == "Feature" else { return colors[index % colors.count] }
         return switch name {
         case "Tasks": Color(red: 0.16, green: 0.38, blue: 0.76)
         case "Memory updates": Color(red: 0.28, green: 0.74, blue: 0.43)
@@ -558,6 +531,68 @@ struct AnalyticsView: View {
     }
 }
 
+private struct AnalyticsChatRow: View {
+    let accountName: String
+    let chat: AnalyticsChat
+    let showsAccountName: Bool
+    @State private var isExpanded = false
+
+    var body: some View {
+        VStack(spacing: 0) {
+            Button { isExpanded.toggle() } label: {
+                HStack(spacing: 8) {
+                    Image(systemName: isExpanded ? "chevron.down" : "chevron.right")
+                        .font(.system(size: 10, weight: .semibold))
+                        .foregroundStyle(.secondary)
+                        .frame(width: 12)
+                    Text(chat.title).lineLimit(1)
+                    if showsAccountName {
+                        Text(accountName).foregroundStyle(.secondary).lineLimit(1)
+                    }
+                    Spacer(minLength: 8)
+                    Text(chat.weeklyLimitPercent.map { String(format: "%.2f%%", $0) } ?? "—")
+                        .frame(width: 120, alignment: .trailing)
+                    Text(chat.balanceUsageCredits.flatMap(Double.init).map { String(format: "%.2f", $0) } ?? "—")
+                        .frame(width: 90, alignment: .trailing)
+                }
+                .font(.system(size: 12))
+                .padding(.horizontal, 16)
+                .padding(.vertical, 10)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("\(isExpanded ? "Collapse" : "Expand") \(chat.title)")
+            .onHover { hovering in
+                if hovering { NSCursor.pointingHand.set() }
+                else { NSCursor.arrow.set() }
+            }
+            if isExpanded {
+                VStack(alignment: .leading, spacing: 7) {
+                    if let value = chat.fiveHourLimitPercent {
+                        HStack { Text("Five-hour limit"); Spacer(); Text(String(format: "%.2f%%", value)) }
+                    }
+                    ForEach(Array(chat.groups.enumerated()), id: \.offset) { _, item in
+                        if let group = item.object {
+                            HStack {
+                                Text(group["model"]?.string ?? "Other")
+                                Spacer()
+                                Text(group["weekly_limit_percent"]?.number.map { String(format: "%.2f%%", $0) } ?? "—")
+                            }
+                        }
+                    }
+                    Text(chat.dataStatus.capitalized + " data")
+                        .foregroundStyle(.secondary)
+                }
+                .font(.system(size: 11))
+                .padding(.leading, 36)
+                .padding(.trailing, 16)
+                .padding(.bottom, 12)
+            }
+        }
+    }
+}
+
 private struct UsageDaySelectionHost<Content: View>: View {
     @State private var selectedDay: String?
     let content: (Binding<String?>) -> Content
@@ -576,15 +611,21 @@ private struct UsageChartSelection: ViewModifier {
                 GeometryReader { geometry in
                     Color.clear.contentShape(Rectangle())
                         .onContinuousHover { phase in
-                            guard case .active(let location) = phase,
-                                  let plotFrame = proxy.plotFrame else { return }
-                            let frame = geometry[plotFrame]
-                            guard frame.contains(location),
-                                  let date = proxy.value(atX: location.x - frame.minX, as: Date.self)
-                            else { return }
-                            let day = ProfileCalendar.key(date.addingTimeInterval(12 * 3_600))
-                            if days.contains(day), selection.wrappedValue != day {
-                                selection.wrappedValue = day
+                            switch phase {
+                            case .active(let location):
+                                guard let plotFrame = proxy.plotFrame else { return }
+                                let frame = geometry[plotFrame]
+                                guard frame.contains(location),
+                                      let date = proxy.value(atX: location.x - frame.minX, as: Date.self)
+                                else {
+                                    if selection.wrappedValue != nil { selection.wrappedValue = nil }
+                                    return
+                                }
+                                let day = ProfileCalendar.key(date.addingTimeInterval(12 * 3_600))
+                                let nextDay = days.contains(day) ? day : nil
+                                if selection.wrappedValue != nextDay { selection.wrappedValue = nextDay }
+                            case .ended:
+                                if selection.wrappedValue != nil { selection.wrappedValue = nil }
                             }
                         }
                 }

@@ -27,6 +27,16 @@ struct AnalyticsChecks {
         """#.utf8))
         precondition(plan.periods[0].usedBasisPoints == 180.25, "Plan percentages may be fractional")
 
+        let usageDays = [
+            "2026-09-21": ["Tasks": 9.0, "Memory updates": 1.0],
+            "2026-09-22": ["Tasks": 0.7, "Memory updates": 0.3]
+        ]
+        let period = AnalyticsUsageBreakdown.totals(usageDays)
+        let memoryDay = AnalyticsUsageBreakdown.share(of: 0.3, in: usageDays["2026-09-22"]!)
+        let memoryPeriod = AnalyticsUsageBreakdown.share(of: period["Memory updates"]!, in: period)
+        precondition(abs(memoryDay - 30) < 0.00001 && abs(memoryPeriod - (1.3 / 11 * 100)) < 0.00001,
+                     "A hovered day's share must differ from the selected period's total share")
+
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent("runway-analytics-checks-\(UUID().uuidString)")
         defer { try? FileManager.default.removeItem(at: directory) }
         let store = AnalyticsArchiveStore(directory: directory)

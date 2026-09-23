@@ -226,3 +226,18 @@ struct AnalyticsArchive: Codable {
         return rows.keys.sorted().compactMap { rows[$0] }
     }
 }
+
+enum AnalyticsUsageBreakdown {
+    static func totals(_ days: [String: [String: Double]]) -> [String: Double] {
+        var totals: [String: Double] = [:]
+        for values in days.values {
+            for (name, value) in values { totals[name, default: 0] += value }
+        }
+        return totals
+    }
+
+    static func share(of value: Double, in values: [String: Double]) -> Double {
+        let total = values.values.reduce(0, +)
+        return total > 0 ? value / total * 100 : 0
+    }
+}
