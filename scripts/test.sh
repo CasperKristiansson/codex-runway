@@ -16,3 +16,5 @@ swiftc -swift-version 6 -parse-as-library Sources/CodexRunway/ProfileModels.swif
 "$build_dir/profile-checks"
 swiftc -swift-version 6 -parse-as-library Sources/CodexRunway/RunwayScroller.swift scripts/ScrollerChecks/main.swift -o "$build_dir/scroller-checks"
 "$build_dir/scroller-checks"
+swiftc -swift-version 6 -parse-as-library Sources/CodexRunway/RunwayBackupStore.swift scripts/BackupChecks/main.swift -o "$build_dir/backup-checks"
+"$build_dir/backup-checks"

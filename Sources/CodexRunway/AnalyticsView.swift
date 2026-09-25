@@ -160,7 +160,8 @@ struct AnalyticsView: View {
                             .font(.system(size: 11)).foregroundStyle(.secondary)
                     }
                     analyticsChart(series, kind: .bar, title: "Plan usage", unit: "% of limit", showsTotal: false,
-                                   selection: daySelection, selectedDay: selectedDay, selectionDays: selectableDays)
+                                   selection: daySelection, selectedDay: selectedDay, selectionDays: selectableDays,
+                                   isUsageChart: true)
                     Text(selectedDay.map { "\($0) · share of that day's usage" }
                          ?? "\(usageRange.label) total · share of period usage")
                         .font(.system(size: 11)).foregroundStyle(.secondary)
@@ -288,21 +289,33 @@ struct AnalyticsView: View {
 
     private var toolsSection: some View {
         let chartDays = days(for: toolRange)
+        let selectableDays = Set(chartDays)
         let plugins = makeSeries(toolBuckets(\AnalyticsArchive.plugins, days: chartDays), days: chartDays, limit: 4)
         let skills = makeSeries(toolBuckets(\AnalyticsArchive.skills, days: chartDays), days: chartDays, limit: 4)
         return VStack(alignment: .leading, spacing: 12) {
             sectionHeader("Tool activity", subtitle: "Plugins and skills used over time") { rangePicker($toolRange) }
             VStack(spacing: 12) {
-                analyticsChart(plugins, kind: .line, title: "Plugins called", unit: "calls")
-                    .padding(18).analyticsCard()
-                analyticsChart(skills, kind: .line, title: "Skills used", unit: "uses")
-                    .padding(18).analyticsCard()
+                UsageDaySelectionHost { daySelection in
+                    let selectedDay = daySelection.wrappedValue.flatMap { selectableDays.contains($0) ? $0 : nil }
+                    return analyticsChart(plugins, kind: .line, title: "Plugins called", unit: "calls",
+                                          selection: daySelection, selectedDay: selectedDay, selectionDays: selectableDays,
+                                          showsHoverDetails: true)
+                }
+                .padding(18).analyticsCard()
+                UsageDaySelectionHost { daySelection in
+                    let selectedDay = daySelection.wrappedValue.flatMap { selectableDays.contains($0) ? $0 : nil }
+                    return analyticsChart(skills, kind: .line, title: "Skills used", unit: "uses",
+                                          selection: daySelection, selectedDay: selectedDay, selectionDays: selectableDays,
+                                          showsHoverDetails: true)
+                }
+                .padding(18).analyticsCard()
             }
         }
     }
 
     private var messagesSection: some View {
         let chartDays = days(for: messageRange)
+        let selectableDays = Set(chartDays)
         let series = makeSeries(messageBuckets(days: chartDays), days: chartDays, limit: 4)
         return VStack(alignment: .leading, spacing: 12) {
             sectionHeader("Messages", subtitle: "Messages sent over time") {
@@ -313,8 +326,13 @@ struct AnalyticsView: View {
                 }
                 .labelsHidden().frame(width: 140)
             }
-            analyticsChart(series, kind: .line, title: "Messages", unit: "messages")
-                .padding(18).analyticsCard()
+            UsageDaySelectionHost { daySelection in
+                let selectedDay = daySelection.wrappedValue.flatMap { selectableDays.contains($0) ? $0 : nil }
+                return analyticsChart(series, kind: .line, title: "Messages", unit: "messages",
+                                      selection: daySelection, selectedDay: selectedDay, selectionDays: selectableDays,
+                                      showsHoverDetails: true)
+            }
+            .padding(18).analyticsCard()
         }
     }
 
@@ -334,7 +352,8 @@ struct AnalyticsView: View {
 
     private func analyticsChart(_ series: AnalyticsSeries, kind: ChartKind, title: String, unit: String,
                                 showsTotal: Bool = true, selection: Binding<String?>? = nil,
-                                selectedDay: String? = nil, selectionDays: Set<String> = []) -> some View {
+                                selectedDay: String? = nil, selectionDays: Set<String> = [],
+                                isUsageChart: Bool = false, showsHoverDetails: Bool = false) -> some View {
         VStack(alignment: .leading, spacing: 12) {
             if showsTotal {
                 VStack(alignment: .leading, spacing: 2) {
@@ -362,18 +381,25 @@ struct AnalyticsView: View {
             }
             .chartForegroundStyleScale(domain: series.categories.map(\.name),
                                        range: Array(series.categories.enumerated()).map {
-                                           chartColor($0.element.name, index: $0.offset, isUsageChart: selection != nil)
+                                           chartColor($0.element.name, index: $0.offset, isUsageChart: isUsageChart)
                                        })
             .chartLegend(.hidden)
             .chartXScale(range: .plotDimension(startPadding: 25, endPadding: 50))
             .chartXAxis { AxisMarks(values: .automatic(desiredCount: 4)) { AxisValueLabel() } }
             .chartYAxis { AxisMarks(position: .leading) { AxisGridLine(); AxisValueLabel() } }
             .modifier(UsageChartSelection(selection: selection, days: selectionDays))
+            .overlay(alignment: .topTrailing) {
+                if showsHoverDetails, let selectedDay {
+                    activityHoverDetails(series, day: selectedDay, unit: unit)
+                        .padding(6)
+                        .allowsHitTesting(false)
+                }
+            }
             .frame(height: 175)
             HStack(spacing: 14) {
                 ForEach(Array(series.categories.enumerated()), id: \.offset) { index, category in
                     HStack(spacing: 4) {
-                        Circle().fill(chartColor(category.name, index: index, isUsageChart: selection != nil))
+                        Circle().fill(chartColor(category.name, index: index, isUsageChart: isUsageChart))
                             .frame(width: 8, height: 8)
                         Text(category.name).lineLimit(1)
                     }
@@ -381,6 +407,33 @@ struct AnalyticsView: View {
             }
             .font(.system(size: 11)).foregroundStyle(.secondary)
         }
+    }
+
+    private func activityHoverDetails(_ series: AnalyticsSeries, day: String, unit: String) -> some View {
+        let points = series.points.filter { $0.day == day && $0.value > 0 }
+        let total = points.reduce(0) { $0 + $1.value }
+        return VStack(alignment: .leading, spacing: 5) {
+            Text(day).fontWeight(.semibold)
+            if points.isEmpty {
+                Text("No activity").foregroundStyle(.secondary)
+            } else {
+                ForEach(points) { point in
+                    HStack(spacing: 10) {
+                        Text(point.category).lineLimit(1)
+                        Spacer(minLength: 6)
+                        Text(point.value.formatted(.number.precision(.fractionLength(0))))
+                            .monospacedDigit()
+                    }
+                }
+                Text("Total \(unit): \(total.formatted(.number.precision(.fractionLength(0))))")
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .font(.system(size: 11))
+        .padding(.horizontal, 10)
+        .padding(.vertical, 8)
+        .frame(width: 200, alignment: .leading)
+        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 8))
     }
 
     private func categorySummary(_ values: [String: Double]) -> some View {

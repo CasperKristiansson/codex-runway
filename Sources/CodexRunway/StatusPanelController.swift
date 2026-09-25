@@ -7,6 +7,7 @@ final class StatusPanelController: NSObject, NSWindowDelegate {
     private static let panelWidth: CGFloat = 420
     private static let minimumUsableHeight: CGFloat = 120
     private let store: RunwayStore
+    private let backupManager: RunwayBackupManager
     private let statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
     private let panel = AccountStatusPanel(
         contentRect: .zero, styleMask: [.borderless, .nonactivatingPanel],
@@ -20,8 +21,9 @@ final class StatusPanelController: NSObject, NSWindowDelegate {
     private var localMonitor: Any?
     private var globalMonitor: Any?
 
-    init(store: RunwayStore) {
+    init(store: RunwayStore, backupManager: RunwayBackupManager) {
         self.store = store
+        self.backupManager = backupManager
         super.init()
         if let button = statusItem.button {
             button.image = RunwayBrand.menuBarMark
@@ -135,7 +137,8 @@ final class StatusPanelController: NSObject, NSWindowDelegate {
             )
             window.title = "Codex Runway Settings"
             window.isReleasedWhenClosed = false
-            let hosting = NSHostingView(rootView: SettingsView(navigation: settingsNavigation).environmentObject(store))
+            let hosting = NSHostingView(rootView: SettingsView(navigation: settingsNavigation)
+                .environmentObject(store).environmentObject(backupManager))
             window.contentView = hosting
             window.setContentSize(hosting.fittingSize)
             window.center()

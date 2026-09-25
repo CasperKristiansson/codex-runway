@@ -5,6 +5,7 @@ import SwiftUI
 @MainActor
 final class CodexRunwayApp: NSObject, NSApplicationDelegate {
     private let store = RunwayStore()
+    private let backupManager = RunwayBackupManager()
     private var menuController: StatusPanelController?
 
     static func main() {
@@ -16,12 +17,14 @@ final class CodexRunwayApp: NSObject, NSApplicationDelegate {
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        menuController = StatusPanelController(store: store)
+        menuController = StatusPanelController(store: store, backupManager: backupManager)
         store.startAutomaticRefresh()
+        backupManager.start()
     }
 
     func applicationWillTerminate(_ notification: Notification) {
         store.stopAutomaticRefresh()
+        backupManager.stop()
     }
 }
 

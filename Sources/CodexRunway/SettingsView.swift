@@ -23,6 +23,7 @@ final class SettingsNavigationState: ObservableObject {
 
 struct SettingsView: View {
     @EnvironmentObject private var store: RunwayStore
+    @EnvironmentObject private var backupManager: RunwayBackupManager
     @ObservedObject var navigation: SettingsNavigationState
 
     var body: some View {
@@ -61,11 +62,66 @@ struct SettingsView: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
+            Section("Backups") {
+                HStack {
+                    Button("Choose Folder…") { chooseBackupFolder() }
+                    if let path = backupManager.destinationPath {
+                        Text(path)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                            .textSelection(.enabled)
+                    } else {
+                        Text("Choose a folder to start backups.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                Toggle("Back up automatically", isOn: Binding(
+                    get: { backupManager.isEnabled },
+                    set: { backupManager.setEnabled($0) }
+                ))
+                .disabled(backupManager.destinationPath == nil)
+                Stepper("Keep daily backups for \(backupManager.keepDailyDays) days", value: Binding(
+                    get: { backupManager.keepDailyDays },
+                    set: { backupManager.setKeepDailyDays($0) }
+                ), in: 1...365)
+                .disabled(backupManager.destinationPath == nil)
+                HStack {
+                    Button("Back Up Now") { Task { await backupManager.backUpNow() } }
+                        .disabled(backupManager.destinationPath == nil || backupManager.isWorking)
+                    if backupManager.isWorking { ProgressView().controlSize(.small) }
+                    if let last = backupManager.lastCompletedAt {
+                        Text("Last backup: \(last.formatted(date: .abbreviated, time: .shortened))")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                Text("One backup per day while Runway is running. Older daily copies are removed after the selected period; the first backup of each month is kept permanently. ZIP files are not encrypted.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                if let message = backupManager.statusMessage {
+                    Text(message).font(.caption).foregroundStyle(.red)
+                }
+            }
         }
         .formStyle(.grouped)
         .scrollContentBackground(.hidden)
         .padding()
         .background(Color.white)
+    }
+
+    private func chooseBackupFolder() {
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = false
+        panel.canCreateDirectories = true
+        panel.allowsMultipleSelection = false
+        panel.prompt = "Use for Backups"
+        if panel.runModal() == .OK, let url = panel.url {
+            backupManager.chooseDestination(url)
+        }
     }
 }
 
