@@ -178,8 +178,9 @@ actor CodexAppServerClient {
         return ActiveAccountProfile(identity: before, usage: usage)
     }
 
-    func readActiveAccount(executablePath: String? = nil) async throws -> ActiveCodexAccount {
-        try start(executablePath: executablePath)
+    func readActiveAccount(executablePath: String? = nil, home: URL? = nil,
+                           configuration: CodexLoginConfiguration? = nil) async throws -> ActiveCodexAccount {
+        try start(executablePath: executablePath, home: home, configuration: configuration)
         defer { stop() }
 
         let initialization = try await request(
@@ -188,10 +189,14 @@ actor CodexAppServerClient {
         )
         guard !initialization.isEmpty else { throw CodexAppServerError.invalidResponse }
         notify(method: "initialized")
-        let accountData = try await request(method: "account/read", params: ["refreshToken": false])
+        let accountData = try await request(method: "account/read", params: ["refreshToken": home != nil])
         let rateLimitData = try await request(method: "account/rateLimits/read", params: nil)
+        let identity = try JSONDecoder().decode(AccountReadResponse.self, from: accountData)
+        let after = try JSONDecoder().decode(AccountReadResponse.self,
+            from: await request(method: "account/read", params: ["refreshToken": false]))
+        guard identity == after else { throw CodexAppServerError.server("Account changed during usage refresh. Try again.") }
         return ActiveCodexAccount(
-            identity: try JSONDecoder().decode(AccountReadResponse.self, from: accountData),
+            identity: identity,
             rateLimits: try JSONDecoder().decode(RateLimitsReadResponse.self, from: rateLimitData)
         )
     }

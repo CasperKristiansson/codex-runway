@@ -32,7 +32,6 @@ final class CodexRunwayApp: NSObject, NSApplicationDelegate {
 struct MenuBarView: View {
     @EnvironmentObject private var store: RunwayStore
     let openSettings: () -> Void
-    let openAccountHistory: (UUID) -> Void
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -129,7 +128,7 @@ struct MenuBarView: View {
                         }
                 }
                 .buttonStyle(FooterButtonStyle(prominent: true))
-                .disabled(store.isRefreshing || store.isManagingLogin || store.loginRecoveryPending)
+                .disabled(store.isRefreshing || store.isManagingLogin || store.loginRecoveryPending || store.refreshingSavedAccountID != nil)
                 .keyboardShortcut(.return, modifiers: [])
             }
         }
@@ -156,12 +155,8 @@ struct MenuBarView: View {
     private func accountList(_ accounts: [CodexAccount]) -> some View {
         VStack(spacing: 8) {
             ForEach(accounts) { account in
-                Button { openAccountHistory(account.id) } label: {
-                    AccountCard(account: account, isActive: account.id == store.activeAccountID)
-                }
-                .buttonStyle(.plain)
-                .help("Open \(account.name) history")
-                .accessibilityLabel("Open \(account.name) history")
+                AccountCard(account: account, isActive: account.id == store.activeAccountID)
+
             }
         }
         .fixedSize(horizontal: false, vertical: true)
@@ -208,6 +203,7 @@ private struct FooterButtonStyle: ButtonStyle {
 }
 
 private struct AccountCard: View {
+    @EnvironmentObject private var store: RunwayStore
     let account: CodexAccount
     let isActive: Bool
 
@@ -224,10 +220,35 @@ private struct AccountCard: View {
                     Text("\(account.name) · \(account.planName)")
                         .font(.subheadline.weight(.semibold))
                         .lineLimit(1)
-                    Text("\(account.displayEmail) · \(isActive ? "Current" : "Saved")")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
+                    HStack(alignment: .firstTextBaseline, spacing: 3) {
+                        Text(account.displayEmail + " ·")
+                            .fixedSize(horizontal: false, vertical: true)
+                        if isActive {
+                            Text("Current")
+                        } else {
+                            Button { Task { await store.refreshUsage(accountID: account.id) } } label: {
+                                HStack(spacing: 3) {
+                                    if store.refreshingSavedAccountID == account.id {
+                                        ProgressView().controlSize(.mini).frame(width: 10, height: 10)
+                                    } else {
+                                        Image(systemName: store.savedUsageErrors[account.id] == nil ? "arrow.clockwise" : "exclamationmark.circle")
+                                            .font(.system(size: 10))
+                                    }
+                                    Text("Refresh")
+                                }
+                            }
+                            .buttonStyle(.plain)
+                            .fixedSize()
+                            .disabled(!store.canRefreshUsage(for: account))
+                            .help(store.savedUsageErrors[account.id] ?? (store.savedLogin(for: account) == nil
+                                ? "Save this account’s login in Settings to refresh its usage."
+                                : "Refresh usage for \(account.displayEmail) without switching Codex."))
+                            .accessibilityLabel("Refresh usage for \(account.displayEmail)")
+                            .modifier(ButtonHoverFeedback(tint: .indigo, cornerRadius: 4))
+                        }
+                    }
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
                 }
                 Spacer()
                 if let snapshot = account.latestSnapshot {
@@ -281,7 +302,6 @@ private struct AccountCard: View {
                 }
                 .shadow(color: .black.opacity(0.035), radius: 3, y: 1)
         }
-        .modifier(ButtonHoverFeedback(tint: .indigo, cornerRadius: 14, fillOpacity: 0.05))
         .overlay {
             RoundedRectangle(cornerRadius: 14, style: .continuous)
                 .strokeBorder(isActive ? Color.indigo.opacity(0.8) : .white.opacity(0.8), lineWidth: isActive ? 2 : 1)

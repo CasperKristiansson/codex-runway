@@ -1,7 +1,7 @@
 import AppKit
 import Foundation
 
-struct CodexLoginConfiguration {
+struct CodexLoginConfiguration: Sendable {
     let storage: String
     var forcedLoginMethod: String? = nil
     var forcedWorkspaceID: String? = nil
@@ -44,6 +44,67 @@ final class CodexLoginSwitcher {
         }
     }
     func profiles() throws -> [SavedLoginProfile] { try vault.profiles() }
+
+    func isCurrent(_ profile: SavedLoginProfile) throws -> Bool {
+        guard let data = try authFile.read() else { return false }
+        return try CodexLoginCache(data).matches(profile, home: authFile.home)
+    }
+
+    /// Inactive usage refresh never replaces the desktop credential file. Its
+    /// per-operation home and token rotations belong solely to this saved login.
+    func readSavedUsage(id: String, configuration: CodexLoginConfiguration,
+                        read: @MainActor (URL, CodexLoginConfiguration) async throws -> ActiveCodexAccount = {
+                            try await CodexAppServerClient().readActiveAccount(home: $0, configuration: $1)
+                        }) async throws -> ActiveCodexAccount {
+        let lock = try authFile.acquireOperationLock()
+        defer { try? lock.close() }
+        guard try !hasPendingRecovery() else { throw LoginSwitchError.recoveryRequired }
+        let login = try vault.load(id: id)
+        let cache = try CodexLoginCache(login.credentials)
+        guard cache.matches(login.profile, home: authFile.home) else { throw LoginSwitchError.invalidCredentials }
+        try configuration.validate(cache)
+        guard try !isCurrent(login.profile) else { throw LoginSwitchError.alreadyCurrentLogin }
+        let home = FileManager.default.temporaryDirectory.appendingPathComponent("runway-usage-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: home, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
+        defer { try? FileManager.default.removeItem(at: home) }
+        let isolated = CodexAuthFile(home: home)
+        try isolated.replace(with: login.credentials, expecting: nil, assertClosed: {})
+
+        func retainRotations() throws {
+            guard let latest = try isolated.read(), let updated = try? CodexLoginCache(latest),
+                  updated.matches(login.profile, home: authFile.home) else { throw LoginSwitchError.invalidCredentials }
+            // If another client selected this identity meanwhile, retain its
+            // current cache instead of overwriting the vault with our clone.
+            if try isCurrent(login.profile) {
+                if let current = try authFile.read() {
+                    let currentCache = try CodexLoginCache(current)
+                    guard currentCache.matches(login.profile, home: authFile.home) else { throw LoginSwitchError.credentialsChanged }
+                    try vault.save(SavedCodexLogin(profile: currentCache.profile(home: authFile.home, now: now()), credentials: current))
+                }
+                throw LoginSwitchError.credentialsChanged
+            }
+            // The lock covers other Runway instances; reject external vault updates too.
+            guard try vault.load(id: id).credentials == login.credentials else { throw LoginSwitchError.credentialsChanged }
+            try vault.save(SavedCodexLogin(profile: updated.profile(home: authFile.home, now: now()), credentials: latest))
+        }
+
+        let response: ActiveCodexAccount
+        do {
+            try Task.checkCancellation()
+            response = try await read(home, configuration)
+        } catch {
+            // Authentication can rotate tokens even when fetching usage fails.
+            try retainRotations()
+            throw error
+        }
+        try retainRotations()
+        guard response.identity.account?.type == "chatgpt",
+              response.identity.account?.email?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() == cache.email,
+              response.rateLimits.accountId == nil || response.rateLimits.accountId == cache.accountID else {
+            throw CodexAppServerError.invalidResponse
+        }
+        return response
+    }
     func forget(id: String) throws {
         guard try !hasPendingRecovery() else { throw LoginSwitchError.recoveryRequired }
         try vault.remove(id: id)

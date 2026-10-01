@@ -409,6 +409,100 @@ struct LoginChecks {
         do { _ = try await onboarding.value; preconditionFailure() } catch is CancellationError {}
         precondition(!fm.fileExists(atPath: onboardingHome!.path))
 
+        // Manual inactive usage: isolated files, latest tokens on success/failure,
+        // and no process-quitting assertion even with the desktop still open.
+        func usage(_ email: String, id: String, used: Double = 32) -> ActiveCodexAccount {
+            ActiveCodexAccount(identity: response(email), rateLimits: RateLimitsReadResponse(accountId: id,
+                rateLimits: RateLimitSnapshot(primary: LimitWindow(usedPercent: used, resetsAt: 1_900_000_000, windowDurationMins: 10080), planType: "pro"), rateLimitResetCredits: nil))
+        }
+        try write(previous)
+        try vault.save(SavedCodexLogin(profile: secondProfile, credentials: second))
+        fixture.open = true
+        let initialProcessChecks = fixture.checks
+        var isolatedUsageHome: URL?
+        let savedResponse = try await switcher.readSavedUsage(id: secondProfile.id, configuration: config) { home, _ in
+            isolatedUsageHome = home
+            precondition(home != root)
+            try check(try CodexAuthFile(home: home).read() == second)
+            try CodexAuthFile(home: home).replace(with: rotatedSecond, expecting: second, assertClosed: {})
+            return usage("second@example.com", id: "account-two")
+        }
+        try check(savedResponse.rateLimits.rateLimits.primary.usedPercent == 32 && (try read()) == previous)
+        precondition(fixture.open && fixture.checks == initialProcessChecks && !fm.fileExists(atPath: isolatedUsageHome!.path))
+        try check(try vault.load(id: secondProfile.id).credentials == rotatedSecond)
+        let newerSecond = try credentials("second@example.com", account: "account-two", rotation: 30)
+        do {
+            _ = try await switcher.readSavedUsage(id: secondProfile.id, configuration: config) { home, _ in
+                isolatedUsageHome = home
+                try CodexAuthFile(home: home).replace(with: newerSecond, expecting: rotatedSecond, assertClosed: {})
+                throw CodexAppServerError.invalidResponse
+            }
+            preconditionFailure()
+        } catch CodexAppServerError.invalidResponse {}
+        try check(try vault.load(id: secondProfile.id).credentials == newerSecond)
+        precondition(!fm.fileExists(atPath: isolatedUsageHome!.path))
+        do {
+            _ = try await switcher.readSavedUsage(id: firstProfile.id, configuration: config) { _, _ in preconditionFailure("Never clone the active session") }
+            preconditionFailure()
+        } catch LoginSwitchError.alreadyCurrentLogin {}
+        do {
+            _ = try await switcher.readSavedUsage(id: secondProfile.id, configuration: config) { _, _ in usage("first@example.com", id: "account-one") }
+            preconditionFailure()
+        } catch CodexAppServerError.invalidResponse {}
+        try check((try read()) == previous)
+
+        // Store updates only the clicked row's statistics, preserves active ID,
+        // excludes other requests, and rejects mismatched server identity.
+        let usageSuite = "runway-usage-checks.\(UUID().uuidString)"
+        let usageDefaults = UserDefaults(suiteName: usageSuite)!
+        defer { usageDefaults.removePersistentDomain(forName: usageSuite) }
+        let activeRow = CodexAccount(name: "First", email: "first@example.com", planName: "Pro", externalAccountID: "account-one")
+        let inactiveRow = CodexAccount(name: "Second", email: "second@example.com", planName: "Pro", externalAccountID: "account-two")
+        usageDefaults.set(try JSONEncoder().encode([activeRow, inactiveRow]), forKey: "codex-runway.accounts.v1")
+        var quotaCalls = 0
+        var savedQuotaCalls = 0
+        var failQuota = false
+        var wrongQuotaIdentity = false
+        var usageStore: RunwayStore!
+        usageStore = RunwayStore(defaults: usageDefaults,
+            forecastJournal: ForecastJournal(directory: root.appendingPathComponent("usage-journal")),
+            analyticsEnabled: false, loginSwitcher: switcher, readLoginConfiguration: { config },
+            readSavedUsage: { id, _ in
+                savedQuotaCalls += 1
+                precondition(id == secondProfile.id && usageStore.refreshingSavedAccountID == inactiveRow.id)
+                let autoRefreshed = await usageStore.refreshActiveAccount()
+                precondition(!autoRefreshed && quotaCalls == 1)
+                await usageStore.refreshUsage(accountID: inactiveRow.id)
+                precondition(savedQuotaCalls == 1 || failQuota || wrongQuotaIdentity)
+                if failQuota { throw CodexAppServerError.invalidResponse }
+                return wrongQuotaIdentity ? usage("first@example.com", id: "account-one") : usage("second@example.com", id: "account-two")
+            }, synchronizeSavedLogin: {}, readProfile: { throw CodexAppServerError.invalidResponse }, readAccount: {
+                quotaCalls += 1
+                return usage("first@example.com", id: "account-one", used: 18)
+            })
+        usageStore.reloadSavedLogins()
+        let activeRefreshed = await usageStore.refreshActiveAccount()
+        precondition(activeRefreshed && usageStore.activeAccountID == activeRow.id)
+        let activeBefore = usageStore.accounts.first { $0.id == activeRow.id }!
+        await usageStore.refreshUsage(accountID: inactiveRow.id)
+        precondition(savedQuotaCalls == 1 && usageStore.refreshingSavedAccountID == nil && usageStore.activeAccountID == activeRow.id)
+        precondition(usageStore.accounts.first { $0.id == inactiveRow.id }!.snapshots.count == 1)
+        precondition(usageStore.accounts.first { $0.id == activeRow.id }! == activeBefore)
+        let afterUsage = usageStore.accounts
+        failQuota = true
+        await usageStore.refreshUsage(accountID: inactiveRow.id)
+        precondition(usageStore.accounts == afterUsage && usageStore.savedUsageErrors[inactiveRow.id] != nil && usageStore.activeAccountID == activeRow.id)
+        failQuota = false
+        wrongQuotaIdentity = true
+        await usageStore.refreshUsage(accountID: inactiveRow.id)
+        precondition(usageStore.accounts == afterUsage && usageStore.activeAccountID == activeRow.id)
+        // Clicking a stale "inactive" marker for the actual current login routes
+        // through the shared active cache, not an isolated session copy.
+        await usageStore.refreshUsage(accountID: activeRow.id)
+        precondition(quotaCalls == 2 && savedQuotaCalls == 3 && usageStore.activeAccountID == activeRow.id)
+        try check((try read()) == previous)
+        fixture.open = false
+
         // Exercise the actual App Server transport with a synthetic child.
         // Sequential reuse must not receive a stale child's exit notification.
         let server = root.appendingPathComponent("synthetic-app-server")
@@ -514,6 +608,38 @@ struct LoginChecks {
         scopedChild.terminate()
         scopedChild.waitUntilExit()
 
+        let usageServer = root.appendingPathComponent("synthetic-usage-server")
+        let usageProgram = """
+        #!/usr/bin/python3
+        import base64, json, os, sys
+        home = os.environ['CODEX_HOME']
+        assert home != '\(root.path)'
+        assert 'cli_auth_credentials_store="file"' in sys.argv
+        identity_reads = 0
+        for line in sys.stdin:
+            request = json.loads(line)
+            if 'id' not in request: continue
+            method = request['method']
+            if method == 'initialize': result = {}
+            elif method == 'account/read':
+                identity_reads += 1
+                assert request['params']['refreshToken'] is (identity_reads == 1)
+                with open(os.path.join(home, 'auth.json'), 'wb') as f:
+                    f.write(base64.b64decode('\(newerSecond.base64EncodedString())'))
+                os.chmod(os.path.join(home, 'auth.json'), 0o600)
+                result = {'account': {'type': 'chatgpt', 'email': 'second@example.com', 'planType': 'pro'}}
+            elif method == 'account/rateLimits/read':
+                result = {'accountId': 'account-two', 'rateLimits': {'primary': {'usedPercent': 32, 'resetsAt': 1900000000, 'windowDurationMins': 10080}}}
+            else: raise RuntimeError('Only usage and identity requests allowed')
+            print(json.dumps({'id': request['id'], 'result': result}), flush=True)
+        """
+        try Data(usageProgram.utf8).write(to: usageServer)
+        try fm.setAttributes([.posixPermissions: 0o700], ofItemAtPath: usageServer.path)
+        let transportUsage = try await switcher.readSavedUsage(id: secondProfile.id, configuration: config) { home, configuration in
+            try await client.readActiveAccount(executablePath: usageServer.path, home: home, configuration: configuration)
+        }
+        try check(transportUsage.rateLimits.accountId == "account-two" && (try read()) == previous)
+
         if ProcessInfo.processInfo.environment["RUNWAY_KEYCHAIN_CHECK"] == "1" {
             // Disposable service scope; never enumerate the real Codex home.
             let keychain = KeychainSavedLoginStore(home: root)
@@ -546,6 +672,6 @@ struct LoginChecks {
                 print("Production process guard: running Codex clients blocked")
             }
         }
-        print("Synthetic managed restart, sign-in transport/cancellation, scoped process checks, crash recovery, rotation, rollback, file safety, and refresh exclusion checks passed")
+        print("Synthetic isolated usage, active identity/history preservation, managed restart, sign-in cancellation, scoped processes, recovery, rotation, rollback and refresh exclusion checks passed")
     }
 }

@@ -64,6 +64,12 @@ open "dist/Codex Runway.app"
 
 The build script creates an ad-hoc-signed local app bundle in `dist/`.
 
+## Manual usage refresh
+
+Inactive account cards show a small Refresh control beside the email, replacing the Saved label. Save that account’s login in Settings first; hover over a disabled control for instructions. A click fetches its allowance and reset times through an isolated App Server session, adds a snapshot to that account’s existing history, and retains refreshed credentials in Keychain. Codex stays open on its current account, and that account’s active marker and history are preserved. Requests are serialized with login changes and other Runway refreshes. Errors appear in the control’s tooltip; previously saved statistics remain available. Inactive accounts are never polled automatically, and this action does not fetch profile insights or Analytics.
+
+Account cards no longer open individual history when clicked. Opening Settings or entering History or Analytics resets the account filter to All active accounts (accounts enabled in Settings); individual filters remain available in each tab’s picker.
+
 ## Manual login switching
 
 1. Open Runway Settings → Saved Logins → Save Current Login to retain the account already selected in Codex. This takes a stable, read-only snapshot and does not require quitting.

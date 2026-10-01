@@ -16,6 +16,8 @@ final class RunwayStore: ObservableObject {
 
     @Published private(set) var savedLogins: [SavedLoginProfile] = []
     @Published private(set) var isManagingLogin = false
+    @Published private(set) var refreshingSavedAccountID: UUID?
+    @Published private(set) var savedUsageErrors: [UUID: String] = [:]
     @Published private(set) var loginStatusMessage: String?
     @Published private(set) var loginStatusIsError = false
     @Published private(set) var loginRecoveryPending = false
@@ -28,6 +30,7 @@ final class RunwayStore: ObservableObject {
     private let signIn: @MainActor (CodexLoginConfiguration) async throws -> Data
     private let loginSwitcher: CodexLoginSwitcher
     private let readLoginConfiguration: @MainActor () async throws -> CodexLoginConfiguration
+    private let readSavedUsage: @MainActor (String, CodexLoginConfiguration) async throws -> ActiveCodexAccount
     private let verifyLogin: @MainActor () async throws -> AccountReadResponse
 
     private let defaultsKey = "codex-runway.accounts.v1"
@@ -56,6 +59,7 @@ final class RunwayStore: ObservableObject {
          verifyLogin: @escaping @MainActor () async throws -> AccountReadResponse = {
              try await CodexAppServerClient().verifyLogin()
          },
+         readSavedUsage: (@MainActor (String, CodexLoginConfiguration) async throws -> ActiveCodexAccount)? = nil,
          synchronizeSavedLogin: (@MainActor () throws -> Void)? = nil,
          closeDesktop: @escaping @MainActor () async throws -> Bool = { try await CodexDesktopLifecycle().close() },
          openDesktop: @escaping @MainActor () async throws -> Void = { try await CodexDesktopLifecycle().open() },
@@ -71,6 +75,7 @@ final class RunwayStore: ObservableObject {
         self.loginSwitcher = loginSwitcher
         self.readLoginConfiguration = readLoginConfiguration
         self.verifyLogin = verifyLogin
+        self.readSavedUsage = readSavedUsage ?? { try await loginSwitcher.readSavedUsage(id: $0, configuration: $1) }
         self.closeDesktop = closeDesktop
         self.openDesktop = openDesktop
         self.desktopIsOpen = desktopIsOpen
@@ -93,7 +98,7 @@ final class RunwayStore: ObservableObject {
     }
 
     var loginActionsDisabled: Bool {
-        isManagingLogin || isRefreshing || isRefreshingProfile || isRefreshingAnalytics
+        isManagingLogin || isRefreshing || isRefreshingProfile || isRefreshingAnalytics || refreshingSavedAccountID != nil
     }
 
     func reloadSavedLogins() {
@@ -217,7 +222,7 @@ final class RunwayStore: ObservableObject {
     }
 
     func forgetLogin(id: String) {
-        guard !isManagingLogin, !loginRecoveryPending else { return }
+        guard !loginActionsDisabled, !loginRecoveryPending else { return }
         do {
             try loginSwitcher.forget(id: id)
             reloadSavedLogins()
@@ -350,57 +355,19 @@ final class RunwayStore: ObservableObject {
     /// discovered by stable account ID and email, never by their plan tier.
     @discardableResult
     func refreshActiveAccount(forceProfile: Bool = false, presentFailure: Bool = true) async -> Bool {
-        guard !isRefreshing, !isManagingLogin, !loginRecoveryPending else { return false }
+        guard !isRefreshing, !isManagingLogin, !loginRecoveryPending, refreshingSavedAccountID == nil else { return false }
         isRefreshing = true
         refreshError = nil
         defer { isRefreshing = false }
 
         do {
             let response = try await readAccount()
-            guard let primaryReset = response.rateLimits.rateLimits.primary.resetsAt else {
+            guard response.rateLimits.rateLimits.primary.resetsAt != nil else {
                 throw CodexAppServerError.invalidResponse
             }
             let index = resolveOrCreateAccount(for: response)
-            var snapshot = UsageSnapshot(
-                capturedAt: now(),
-                usedPercent: response.rateLimits.rateLimits.primary.usedPercent,
-                resetAt: Date(timeIntervalSince1970: primaryReset),
-                bankedResetCount: response.rateLimits.rateLimitResetCredits?.availableCount ?? 0
-            )
-            let planName = Self.displayPlanName(
-                response.identity.account?.planType ?? response.rateLimits.rateLimits.planType
-            )
-            if let backendID = response.rateLimits.accountId, !backendID.isEmpty {
-                for otherIndex in accounts.indices where otherIndex != index && accounts[otherIndex].externalAccountID == backendID {
-                    accounts[otherIndex].externalAccountID = nil
-                }
-                accounts[index].externalAccountID = backendID
-            }
-            if let email = response.identity.account?.email, !email.isEmpty {
-                accounts[index].email = email
-            }
-            accounts[index].planName = planName
-            snapshot.capacityUnits = accounts[index].capacityUnits
-            snapshot.windowDurationMins = response.rateLimits.rateLimits.primary.windowDurationMins
-            snapshot.secondaryUsedPercent = response.rateLimits.rateLimits.secondary?.usedPercent
-            snapshot.secondaryResetAt = response.rateLimits.rateLimits.secondary?.resetsAt.map { Date(timeIntervalSince1970: $0) }
-            accounts[index].snapshots.append(snapshot)
-            for accountIndex in accounts.indices {
-                accounts[accountIndex].snapshots = CapacityForecast.retainedSnapshots(accounts[accountIndex].snapshots, now: snapshot.capturedAt)
-                let cutoff = ProfileCalendar.key(HistoryRetention.cutoff(now: now()))
-                accounts[accountIndex].profile?.dailyUsageBuckets.removeAll { $0.startDate < cutoff }
-            }
+            appendUsage(response, index: index)
             activeAccountID = accounts[index].id
-            save()
-            do {
-                try forecastJournal.record(accounts: accounts, now: snapshot.capturedAt)
-                forecastRecordingError = nil
-            } catch {
-                // A diagnostic write failure must not discard a successful quota
-                // refresh or change the displayed forecast.
-                forecastRecordingError = error.localizedDescription
-                NSLog("Codex Runway forecast recording failed: %@", error.localizedDescription)
-            }
             await refreshProfileIfNeeded(accountID: accounts[index].id, force: forceProfile)
             if analyticsEnabled, let externalAccountID = accounts[index].externalAccountID {
                 let accountID = accounts[index].id
@@ -416,6 +383,102 @@ final class RunwayStore: ObservableObject {
         }
     }
 
+    func savedLogin(for account: CodexAccount) -> SavedLoginProfile? {
+        let matches = savedLogins.filter {
+            $0.email == normalizedEmail(account.email)
+                && (account.externalAccountID == nil || $0.accountID == account.externalAccountID)
+        }
+        return matches.count == 1 ? matches.first : nil
+    }
+
+    func canRefreshUsage(for account: CodexAccount) -> Bool {
+        !loginActionsDisabled && !loginRecoveryPending && savedLogin(for: account) != nil
+    }
+
+    /// Manual refresh of an inactive identity updates its history without marking
+    /// that identity active, requesting insights, or touching the desktop login.
+    func refreshUsage(accountID: UUID) async {
+        guard !loginActionsDisabled, !loginRecoveryPending,
+              let account = accounts.first(where: { $0.id == accountID }) else { return }
+        savedUsageErrors[accountID] = nil
+        guard let login = savedLogin(for: account) else {
+            savedUsageErrors[accountID] = "Save this account’s login in Settings to refresh its usage."
+            return
+        }
+        do {
+            if try loginSwitcher.isCurrent(login) {
+                let succeeded = await refreshActiveAccount()
+                if !succeeded { savedUsageErrors[accountID] = refreshError ?? "Usage could not be refreshed." }
+                return
+            }
+            refreshingSavedAccountID = accountID
+            defer { refreshingSavedAccountID = nil }
+            let configuration = try await readLoginConfiguration()
+            let response = try await readSavedUsage(login.id, configuration)
+            guard response.identity.account?.type == "chatgpt",
+                  normalizedEmail(response.identity.account?.email) == login.email,
+                  response.rateLimits.accountId == nil || response.rateLimits.accountId == login.accountID,
+                  response.rateLimits.rateLimits.primary.resetsAt != nil,
+                  let index = accounts.firstIndex(where: { $0.id == accountID }),
+                  normalizedEmail(accounts[index].email) == login.email,
+                  accounts[index].externalAccountID == nil || accounts[index].externalAccountID == login.accountID else {
+                throw CodexAppServerError.invalidResponse
+            }
+            appendUsage(response, index: index)
+            reloadSavedLogins()
+        } catch LoginSwitchError.alreadyCurrentLogin {
+            // The identity became active between preflight and isolated setup.
+            refreshingSavedAccountID = nil
+            let succeeded = await refreshActiveAccount()
+            if !succeeded { savedUsageErrors[accountID] = refreshError ?? "Usage could not be refreshed." }
+        } catch {
+            savedUsageErrors[accountID] = error.localizedDescription
+        }
+    }
+
+    private func appendUsage(_ response: ActiveCodexAccount, index: Int) {
+        guard let reset = response.rateLimits.rateLimits.primary.resetsAt else { return }
+        var snapshot = UsageSnapshot(
+            capturedAt: now(),
+            usedPercent: response.rateLimits.rateLimits.primary.usedPercent,
+            resetAt: Date(timeIntervalSince1970: reset),
+            bankedResetCount: response.rateLimits.rateLimitResetCredits?.availableCount ?? 0
+        )
+        let planName = Self.displayPlanName(
+            response.identity.account?.planType ?? response.rateLimits.rateLimits.planType
+        )
+        if let backendID = response.rateLimits.accountId, !backendID.isEmpty {
+            for otherIndex in accounts.indices where otherIndex != index && accounts[otherIndex].externalAccountID == backendID {
+                accounts[otherIndex].externalAccountID = nil
+            }
+            accounts[index].externalAccountID = backendID
+        }
+        if let email = response.identity.account?.email, !email.isEmpty {
+            accounts[index].email = email
+        }
+        accounts[index].planName = planName
+        snapshot.capacityUnits = accounts[index].capacityUnits
+        snapshot.windowDurationMins = response.rateLimits.rateLimits.primary.windowDurationMins
+        snapshot.secondaryUsedPercent = response.rateLimits.rateLimits.secondary?.usedPercent
+        snapshot.secondaryResetAt = response.rateLimits.rateLimits.secondary?.resetsAt.map { Date(timeIntervalSince1970: $0) }
+        accounts[index].snapshots.append(snapshot)
+        for accountIndex in accounts.indices {
+            accounts[accountIndex].snapshots = CapacityForecast.retainedSnapshots(accounts[accountIndex].snapshots, now: snapshot.capturedAt)
+            let cutoff = ProfileCalendar.key(HistoryRetention.cutoff(now: now()))
+            accounts[accountIndex].profile?.dailyUsageBuckets.removeAll { $0.startDate < cutoff }
+        }
+        save()
+        do {
+            try forecastJournal.record(accounts: accounts, now: snapshot.capturedAt)
+            forecastRecordingError = nil
+        } catch {
+            // A diagnostic write failure must not discard a successful quota
+            // refresh or change the displayed forecast.
+            forecastRecordingError = error.localizedDescription
+            NSLog("Codex Runway forecast recording failed: %@", error.localizedDescription)
+        }
+    }
+
     func refreshAnalyticsForSignedInAccount() async {
         guard let activeAccountID,
               let account = accounts.first(where: { $0.id == activeAccountID }),
@@ -424,7 +487,7 @@ final class RunwayStore: ObservableObject {
     }
 
     private func refreshAnalytics(accountID: UUID, externalAccountID: String, forceChats: Bool = false) async {
-        guard !isRefreshingAnalytics, !isManagingLogin, !loginRecoveryPending else { return }
+        guard !isRefreshingAnalytics, !isManagingLogin, !loginRecoveryPending, refreshingSavedAccountID == nil else { return }
         isRefreshingAnalytics = true
         analyticsRefreshError = nil
         defer { isRefreshingAnalytics = false }
@@ -466,7 +529,7 @@ final class RunwayStore: ObservableObject {
     }
 
     private func refreshProfileIfNeeded(accountID: UUID, force: Bool) async {
-        guard !isManagingLogin, !loginRecoveryPending, let account = accounts.first(where: { $0.id == accountID }),
+        guard !isManagingLogin, !loginRecoveryPending, refreshingSavedAccountID == nil, let account = accounts.first(where: { $0.id == accountID }),
               force || AccountProfile.needsRefresh(account.profile, now: now()) else { return }
         isRefreshingProfile = true
         profileRefreshError = nil

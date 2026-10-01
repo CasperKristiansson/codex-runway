@@ -110,8 +110,7 @@ final class StatusPanelController: NSObject, NSWindowDelegate {
         AnyView(
             FittingMenuPanel(maximumHeight: maximumHeight,
                 content: AnyView(MenuBarView(
-                    openSettings: { [weak self] in self?.showSettings() },
-                    openAccountHistory: { [weak self] accountID in self?.showAccountHistory(accountID) }
+                    openSettings: { [weak self] in self?.showSettings() }
                 ).environmentObject(store)))
         )
     }
@@ -129,6 +128,7 @@ final class StatusPanelController: NSObject, NSWindowDelegate {
     }
 
     private func showSettings() {
+        settingsNavigation.resetAccountFilter()
         hidePanel()
         if settingsWindow == nil {
             let window = NSWindow(
@@ -148,10 +148,7 @@ final class StatusPanelController: NSObject, NSWindowDelegate {
         settingsWindow?.makeKeyAndOrderFront(nil)
     }
 
-    private func showAccountHistory(_ accountID: UUID) {
-        settingsNavigation.showProfile(for: accountID)
-        showSettings()
-    }
+
 }
 
 /// Preserve the natural three-card height on large screens; allow scrolling

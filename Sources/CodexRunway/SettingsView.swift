@@ -2,23 +2,15 @@ import SwiftUI
 
 @MainActor
 final class SettingsNavigationState: ObservableObject {
-    @Published var tab = 0
-    @Published var selectedAccountID: UUID? {
+    @Published var tab = 0 {
         didSet {
-            if let selectedAccountID {
-                UserDefaults.standard.set(selectedAccountID.uuidString, forKey: "codex-runway.selected-account.v1")
-            }
+            if tab == 1 || tab == 2 { selectedAccountID = nil }
         }
     }
+    @Published var selectedAccountID: UUID?
 
-    init() {
-        selectedAccountID = UserDefaults.standard.string(forKey: "codex-runway.selected-account.v1").flatMap(UUID.init(uuidString:))
-    }
+    func resetAccountFilter() { selectedAccountID = nil }
 
-    func showProfile(for accountID: UUID) {
-        selectedAccountID = accountID
-        tab = 1
-    }
 }
 
 struct SettingsView: View {
@@ -83,7 +75,7 @@ struct SettingsView: View {
                             .disabled(store.loginActionsDisabled || store.loginRecoveryPending)
                             .accessibilityLabel("Switch to \(login.email) and open Codex")
                         Button("Forget") { store.forgetLogin(id: login.id) }
-                            .disabled(store.isManagingLogin || store.loginRecoveryPending)
+                            .disabled(store.loginActionsDisabled || store.loginRecoveryPending)
                             .help("Remove this saved login from Keychain; keep the current login and account history")
                     }
                 }
