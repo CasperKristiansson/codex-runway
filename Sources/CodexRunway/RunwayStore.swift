@@ -18,6 +18,14 @@ final class RunwayStore: ObservableObject {
     @Published private(set) var isManagingLogin = false
     @Published private(set) var loginStatusMessage: String?
     @Published private(set) var loginStatusIsError = false
+    @Published private(set) var loginRecoveryPending = false
+    @Published private(set) var loginCanCancel = false
+    private var loginTask: Task<Void, Never>?
+    private let closeDesktop: @MainActor () async throws -> Bool
+    private let openDesktop: @MainActor () async throws -> Void
+    private let desktopIsOpen: @MainActor () -> Bool
+    private let synchronizeSavedLogin: @MainActor () throws -> Void
+    private let signIn: @MainActor (CodexLoginConfiguration) async throws -> Data
     private let loginSwitcher: CodexLoginSwitcher
     private let readLoginConfiguration: @MainActor () async throws -> CodexLoginConfiguration
     private let verifyLogin: @MainActor () async throws -> AccountReadResponse
@@ -48,6 +56,11 @@ final class RunwayStore: ObservableObject {
          verifyLogin: @escaping @MainActor () async throws -> AccountReadResponse = {
              try await CodexAppServerClient().verifyLogin()
          },
+         synchronizeSavedLogin: (@MainActor () throws -> Void)? = nil,
+         closeDesktop: @escaping @MainActor () async throws -> Bool = { try await CodexDesktopLifecycle().close() },
+         openDesktop: @escaping @MainActor () async throws -> Void = { try await CodexDesktopLifecycle().open() },
+         desktopIsOpen: @escaping @MainActor () -> Bool = { NSWorkspace.shared.runningApplications.contains { $0.bundleIdentifier == "com.openai.codex" } },
+         signIn: @escaping @MainActor (CodexLoginConfiguration) async throws -> Data = { try await CodexAccountOnboarding().add(configuration: $0) },
          now: @escaping () -> Date = { .now },
          readProfile: @escaping @MainActor () async throws -> ActiveAccountProfile = {
              try await CodexAppServerClient().readActiveProfile()
@@ -58,6 +71,11 @@ final class RunwayStore: ObservableObject {
         self.loginSwitcher = loginSwitcher
         self.readLoginConfiguration = readLoginConfiguration
         self.verifyLogin = verifyLogin
+        self.closeDesktop = closeDesktop
+        self.openDesktop = openDesktop
+        self.desktopIsOpen = desktopIsOpen
+        self.signIn = signIn
+        self.synchronizeSavedLogin = synchronizeSavedLogin ?? { try loginSwitcher.syncCurrentIfSaved() }
         self.forecastJournal = forecastJournal
         self.analyticsArchiveStore = analyticsArchiveStore
         self.analyticsClient = analyticsClient
@@ -79,73 +97,161 @@ final class RunwayStore: ObservableObject {
     }
 
     func reloadSavedLogins() {
-        do { savedLogins = try loginSwitcher.profiles() }
-        catch { setLoginMessage(error.localizedDescription, isError: true) }
+        do {
+            savedLogins = try loginSwitcher.profiles()
+            loginRecoveryPending = try loginSwitcher.hasPendingRecovery()
+            if loginRecoveryPending { setLoginMessage("An interrupted switch needs recovery. Select Recover Switch before switching or refreshing.", isError: true) }
+        } catch {
+            loginRecoveryPending = true
+            setLoginMessage(error.localizedDescription, isError: true)
+        }
     }
 
     func saveCurrentLogin() async {
         await performLoginOperation {
+            self.setLoginMessage("Saving current login…")
             let configuration = try await self.readLoginConfiguration()
             let profile = try self.loginSwitcher.saveCurrent(configuration: configuration)
-            self.savedLogins = try self.loginSwitcher.profiles()
+            self.reloadSavedLogins()
             self.setLoginMessage("Saved login for \(profile.email).")
+        }
+    }
+
+    func addLogin() async {
+        await performLoginOperation {
+            guard !self.loginRecoveryPending else { throw LoginSwitchError.recoveryRequired }
+            let configuration = try await self.readLoginConfiguration()
+            try configuration.validate()
+            self.loginCanCancel = true
+            self.setLoginMessage("Complete sign-in in your browser. Your current Codex login stays selected.")
+            let data = try await self.signIn(configuration)
+            try Task.checkCancellation()
+            self.loginCanCancel = false
+            let profile = try self.loginSwitcher.importLogin(data, configuration: configuration)
+            self.reloadSavedLogins()
+            self.setLoginMessage("Added \(profile.email). Select it when you’re ready to switch.")
         }
     }
 
     func switchLogin(id: String, openCodex: Bool = true) async {
         await performLoginOperation {
+            self.setLoginMessage("Checking saved login…")
             let configuration = try await self.readLoginConfiguration()
-            let profile = try await self.loginSwitcher.activate(id: id, configuration: configuration, verify: self.verifyLogin)
-            self.activeAccountID = self.accounts.first {
-                $0.email.lowercased() == profile.email && ($0.externalAccountID == nil || $0.externalAccountID == profile.accountID)
-            }?.id
-            // A metadata-listing failure must not hide a completed switch.
-            self.reloadSavedLogins()
-            self.setLoginMessage("Selected \(profile.email). Open Codex when ready.")
-            if openCodex {
-                try self.loginSwitcher.requireCurrent(profile)
-                if let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: "com.openai.codex"),
-                   NSWorkspace.shared.open(url) {
-                    self.setLoginMessage("Selected \(profile.email). Opening Codex…")
-                } else {
-                    self.setLoginMessage("Selected \(profile.email). Open Codex manually; Runway could not launch it.")
+            if try self.loginSwitcher.preflight(id: id, configuration: configuration) {
+                try self.loginSwitcher.syncCurrentIfSaved()
+                self.reloadSavedLogins()
+                self.setLoginMessage("This account is already selected.")
+                if openCodex, !self.desktopIsOpen() {
+                    try self.loginSwitcher.requireClosed()
+                    do { try await self.openDesktop() }
+                    catch { self.setLoginMessage("This account is already selected. Open Codex manually; Runway could not launch it.", isError: true) }
                 }
+                return
+            }
+            try await self.withDesktopClosed(reopen: openCodex) {
+                let profile = try await self.loginSwitcher.activate(id: id, configuration: configuration,
+                    verify: self.verifyLogin, progress: { self.setLoginMessage($0) })
+                self.selectLoginProfile(profile)
+                self.setLoginMessage("Selected \(profile.email).")
             }
         }
     }
 
+    func recoverLogin() async {
+        await performLoginOperation {
+            self.setLoginMessage("Checking interrupted switch…")
+            let configuration = try await self.readLoginConfiguration()
+            try await self.withDesktopClosed(reopen: true) {
+                self.setLoginMessage("Recovering interrupted switch…")
+                let profile = try await self.loginSwitcher.recover(configuration: configuration, verify: self.verifyLogin)
+                if let profile { self.selectLoginProfile(profile) }
+                self.setLoginMessage(profile.map { "Interrupted switch resolved. Selected \($0.email)." } ?? "Interrupted switch resolved.")
+            }
+        }
+    }
+
+    private func selectLoginProfile(_ profile: SavedLoginProfile) {
+        activeAccountID = accounts.first {
+            $0.email.lowercased() == profile.email && ($0.externalAccountID == nil || $0.externalAccountID == profile.accountID)
+        }?.id
+    }
+
+    /// A declined/cancelled quit never enters the credential transaction. Once
+    /// replacement starts, finish verification or rollback before allowing cancellation.
+    private func withDesktopClosed(reopen: Bool, action: () async throws -> Void) async throws {
+        loginCanCancel = true
+        setLoginMessage("Closing Codex… Finish or stop active tasks if Codex asks.")
+        let wasOpen = try await closeDesktop()
+        loginCanCancel = false
+        do {
+            try Task.checkCancellation()
+            try loginSwitcher.requireClosed()
+            try await action()
+        } catch {
+            reloadSavedLogins()
+            if wasOpen, !loginRecoveryPending {
+                // An unchanged/rolled-back login can reopen. Never launch an unresolved transaction.
+                do { try loginSwitcher.requireClosed(); try await openDesktop() }
+                catch { setLoginMessage("Codex could not be reopened. Open it manually.", isError: true) }
+            }
+            throw error
+        }
+        reloadSavedLogins()
+        if reopen {
+            guard !loginRecoveryPending else { throw LoginSwitchError.recoveryRequired }
+            try loginSwitcher.requireClosed()
+            let completedMessage = loginStatusMessage ?? "Account selected."
+            setLoginMessage("Opening Codex…")
+            do {
+                try await openDesktop()
+                setLoginMessage(completedMessage + " Codex opened.")
+            } catch {
+                setLoginMessage(completedMessage + " Open Codex manually; Runway could not launch it.", isError: true)
+            }
+        }
+    }
+
+    func cancelLoginOperation() {
+        guard loginCanCancel else { return }
+        loginTask?.cancel()
+    }
+
     func forgetLogin(id: String) {
-        guard !isManagingLogin else { return }
+        guard !isManagingLogin, !loginRecoveryPending else { return }
         do {
             try loginSwitcher.forget(id: id)
-            savedLogins = try loginSwitcher.profiles()
+            reloadSavedLogins()
             setLoginMessage("Saved login removed. The current Codex login and account history are kept.")
         } catch { setLoginMessage(error.localizedDescription, isError: true) }
     }
 
-    private func performLoginOperation(_ action: () async throws -> Void) async {
+    private func performLoginOperation(_ action: @escaping @MainActor () async throws -> Void) async {
         guard !loginActionsDisabled else {
             setLoginMessage(LoginSwitchError.refreshRunning.localizedDescription, isError: true)
             return
         }
-        // Set before the first suspension: timer, wake, manual refresh and
-        // queued Analytics tasks cannot start while credentials are changing.
         isManagingLogin = true
         loginStatusMessage = nil
         loginStatusIsError = false
-        defer { isManagingLogin = false }
-        do {
-            try loginSwitcher.requireClosed()
-            try await action()
-        } catch {
-            if let failure = error as? LoginSwitchError {
-                switch failure {
-                case .recoveryRequired, .credentialsChanged, .currentVerificationFailed: activeAccountID = nil
-                default: break
+        defer { isManagingLogin = false; loginCanCancel = false; loginTask = nil }
+        let task = Task { @MainActor in
+            do { try await action() }
+            catch is CancellationError { self.setLoginMessage("Cancelled. No account switch was committed.") }
+            catch {
+                if let failure = error as? LoginSwitchError {
+                    switch failure {
+                    case .recoveryRequired, .credentialsChanged, .currentVerificationFailed: self.activeAccountID = nil
+                    default: break
+                    }
                 }
+                self.setLoginMessage(error.localizedDescription, isError: true)
             }
-            setLoginMessage(error.localizedDescription, isError: true)
+            // Keep refreshes blocked if a journal remains or Keychain is unavailable.
+            do { self.loginRecoveryPending = try self.loginSwitcher.hasPendingRecovery() }
+            catch { self.loginRecoveryPending = true }
         }
+        loginTask = task
+        await task.value
     }
 
     private func setLoginMessage(_ message: String, isError: Bool = false) {
@@ -244,7 +350,7 @@ final class RunwayStore: ObservableObject {
     /// discovered by stable account ID and email, never by their plan tier.
     @discardableResult
     func refreshActiveAccount(forceProfile: Bool = false, presentFailure: Bool = true) async -> Bool {
-        guard !isRefreshing, !isManagingLogin else { return false }
+        guard !isRefreshing, !isManagingLogin, !loginRecoveryPending else { return false }
         isRefreshing = true
         refreshError = nil
         defer { isRefreshing = false }
@@ -300,6 +406,8 @@ final class RunwayStore: ObservableObject {
                 let accountID = accounts[index].id
                 Task { await self.refreshAnalytics(accountID: accountID, externalAccountID: externalAccountID) }
             }
+            do { try synchronizeSavedLogin() }
+            catch { setLoginMessage("Usage refreshed, but the saved login could not be updated. \(error.localizedDescription)", isError: true) }
             return true
         } catch {
             activeAccountID = nil
@@ -316,7 +424,7 @@ final class RunwayStore: ObservableObject {
     }
 
     private func refreshAnalytics(accountID: UUID, externalAccountID: String, forceChats: Bool = false) async {
-        guard !isRefreshingAnalytics, !isManagingLogin else { return }
+        guard !isRefreshingAnalytics, !isManagingLogin, !loginRecoveryPending else { return }
         isRefreshingAnalytics = true
         analyticsRefreshError = nil
         defer { isRefreshingAnalytics = false }
@@ -358,7 +466,7 @@ final class RunwayStore: ObservableObject {
     }
 
     private func refreshProfileIfNeeded(accountID: UUID, force: Bool) async {
-        guard !isManagingLogin, let account = accounts.first(where: { $0.id == accountID }),
+        guard !isManagingLogin, !loginRecoveryPending, let account = accounts.first(where: { $0.id == accountID }),
               force || AccountProfile.needsRefresh(account.profile, now: now()) else { return }
         isRefreshingProfile = true
         profileRefreshError = nil

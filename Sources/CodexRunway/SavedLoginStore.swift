@@ -30,10 +30,15 @@ enum LoginSwitchError: LocalizedError {
     case currentVerificationFailed
     case verificationFailed
     case recoveryRequired
+    case quitFailed
+    case quitTimedOut
+    case reopenFailed
+    case signInFailed
+    case alreadyCurrentLogin
 
     var errorDescription: String? {
         switch self {
-        case .clientsRunning(let names): "Quit \(names.joined(separator: ", ")) before saving or switching a login."
+        case .clientsRunning(let names): "Close these Codex clients before switching: \(names.joined(separator: ", ")). Clients with an unknown credential location must also be closed."
         case .processCheckFailed: "Runway could not check running Codex clients. No login was changed."
         case .refreshRunning: "Wait for Runway's refresh to finish, then try again."
         case .unsupportedStorage: "Switching requires Codex's file-based credential storage. Runway will not change your authentication settings."
@@ -48,6 +53,11 @@ enum LoginSwitchError: LocalizedError {
         case .currentVerificationFailed: "Your current login could not be verified. Sign in normally to Codex, quit it, then save the login again."
         case .verificationFailed: "The selected login could not be verified. Your previous login was restored. Sign in normally to the selected account and save it again."
         case .recoveryRequired: "Switching could not finish safely. Close all Codex clients and check the selected account before reopening Codex. Your saved logins remain in Keychain."
+        case .quitFailed: "Codex declined the quit request. Finish or stop its active tasks, then try again. The login has not changed."
+        case .quitTimedOut: "Codex did not finish quitting within 30 seconds. Finish or stop its active tasks, then try again. The login has not changed."
+        case .reopenFailed: "The login was selected, but Codex could not be opened. Open Codex manually."
+        case .signInFailed: "Sign-in did not complete. Your current Codex login has not changed."
+        case .alreadyCurrentLogin: "This account is already selected in Codex. Use Save Current Login to retain its current session."
         }
     }
 }

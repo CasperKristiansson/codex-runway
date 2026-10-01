@@ -1,5 +1,6 @@
 import Foundation
 import Darwin
+import AppKit
 
 struct RateLimitsReadResponse: Decodable {
     let accountId: String?
@@ -73,6 +74,57 @@ actor CodexAppServerClient {
     private var buffer = Data()
     private var pending: [Int: CheckedContinuation<Data, Error>] = [:]
     private var nextID = 1
+    private var loginNotifications: [Data] = []
+    private var loginWaiter: CheckedContinuation<Data, Error>?
+
+    func signIn(home: URL, configuration: CodexLoginConfiguration, executablePath: String? = nil,
+                openBrowser: @escaping @MainActor @Sendable (URL) throws -> Void = { url in
+                    guard NSWorkspace.shared.open(url) else { throw LoginSwitchError.signInFailed }
+                }) async throws {
+        try configuration.validate()
+        try start(executablePath: executablePath, home: home, configuration: configuration)
+        defer { stop() }
+        _ = try await request(method: "initialize", params: ["clientInfo": ["name": "codex-runway", "version": "0.1.0"]])
+        notify(method: "initialized")
+        let start = try await request(method: "account/login/start", params: ["type": "chatgpt", "useHostedLoginSuccessPage": true, "appBrand": "codex"])
+        guard let object = try JSONSerialization.jsonObject(with: start) as? [String: Any],
+              let loginID = object["loginId"] as? String,
+              let authURL = object["authUrl"] as? String, let url = URL(string: authURL),
+              url.scheme == "https", url.host == "auth.openai.com", url.user == nil, url.password == nil else {
+            throw LoginSwitchError.signInFailed
+        }
+        try Task.checkCancellation()
+        try await openBrowser(url)
+        let completion = try await waitForLogin()
+        guard let result = try JSONSerialization.jsonObject(with: completion) as? [String: Any],
+              result["loginId"] as? String == loginID, result["success"] as? Bool == true else {
+            throw LoginSwitchError.signInFailed
+        }
+        let identity = try JSONDecoder().decode(AccountReadResponse.self,
+            from: await request(method: "account/read", params: ["refreshToken": false]))
+        guard let data = try CodexAuthFile(home: home).read(),
+              let cache = try? CodexLoginCache(data), identity.account?.type == "chatgpt",
+              identity.account?.email?.lowercased() == cache.email else { throw LoginSwitchError.signInFailed }
+        try configuration.validate(cache)
+    }
+
+    private func waitForLogin() async throws -> Data {
+        try Task.checkCancellation()
+        if !loginNotifications.isEmpty { return loginNotifications.removeFirst() }
+        let timeout = Task {
+            try await Task.sleep(for: .seconds(600))
+            failLogin(with: LoginSwitchError.signInFailed)
+        }
+        defer { timeout.cancel() }
+        return try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { loginWaiter = $0 }
+        } onCancel: { Task { await self.failLogin(with: CancellationError()) } }
+    }
+
+    private func failLogin(with error: Error) {
+        loginWaiter?.resume(throwing: error)
+        loginWaiter = nil
+    }
 
     /// Local effective configuration only; no authentication or quota refresh.
     func readLoginConfiguration(executablePath: String? = nil) async throws -> CodexLoginConfiguration {
@@ -174,7 +226,8 @@ actor CodexAppServerClient {
         return Array(result.prefix(limit))
     }
 
-    private func start(executablePath: String?) throws {
+    private func start(executablePath: String?, home: URL? = nil, configuration: CodexLoginConfiguration? = nil) throws {
+        guard process == nil else { throw LoginSwitchError.refreshRunning }
         let executable = executablePath ?? Self.defaultExecutablePath()
         guard let executable, FileManager.default.isExecutableFile(atPath: executable) else {
             throw CodexAppServerError.executableNotFound
@@ -183,16 +236,29 @@ actor CodexAppServerClient {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: executable)
         process.arguments = ["app-server", "--stdio"]
+        if let home {
+            var environment = ProcessInfo.processInfo.environment
+            environment["CODEX_HOME"] = home.path
+            process.environment = environment
+            var overrides = ["-c", "cli_auth_credentials_store=\"file\""]
+            if let workspace = configuration?.forcedWorkspaceID {
+                let encoded = String(decoding: try JSONEncoder().encode(workspace), as: UTF8.self)
+                overrides += ["-c", "forced_chatgpt_workspace_id=\(encoded)"]
+            }
+            process.arguments = overrides + ["app-server", "--stdio"]
+        }
+        buffer.removeAll()
+        loginNotifications.removeAll()
         let input = Pipe()
         let output = Pipe()
         process.standardInput = input
         process.standardOutput = output
         process.standardError = FileHandle.nullDevice
 
-        output.fileHandleForReading.readabilityHandler = { [weak self] handle in
+        output.fileHandleForReading.readabilityHandler = { [weak self, weak process] handle in
             let data = handle.availableData
-            guard !data.isEmpty else { return }
-            Task { await self?.receive(data) }
+            guard !data.isEmpty, let pid = process?.processIdentifier else { return }
+            Task { await self?.receive(data, pid: pid) }
         }
         process.terminationHandler = { [weak self] child in
             let pid = child.processIdentifier
@@ -205,19 +271,40 @@ actor CodexAppServerClient {
     }
 
     private func stop() {
+        failLogin(with: CancellationError())
         for continuation in pending.values {
             continuation.resume(throwing: CancellationError())
         }
         pending.removeAll()
         process?.standardOutput.map { ($0 as? Pipe)?.fileHandleForReading.readabilityHandler = nil }
         process?.terminationHandler = nil
-        if let process, process.isRunning {
-            process.terminate()
-            // Auth operations must not leave our own CLI holding cached tokens.
-            // Bound shutdown; only this child process may be force-stopped.
-            for _ in 0..<50 where process.isRunning { usleep(10_000) }
-            if process.isRunning { kill(process.processIdentifier, SIGKILL) }
-            process.waitUntilExit()
+        try? stdin?.close()
+        if let process {
+            let pid = process.processIdentifier
+            func exited() -> Bool {
+                var status: Int32 = 0
+                let result = waitpid(pid, &status, WNOHANG)
+                // Foundation may already have reaped the child. Never signal
+                // an ECHILD PID, which could have been reused by another process.
+                return result == pid || (result == -1 && errno == ECHILD)
+            }
+            if !exited() {
+                kill(pid, SIGTERM)
+                var didExit = false
+                for _ in 0..<50 {
+                    if exited() { didExit = true; break }
+                    usleep(10_000)
+                }
+                if !didExit {
+                    kill(pid, SIGKILL)
+                    for _ in 0..<100 {
+                        if exited() { break }
+                        usleep(10_000)
+                    }
+                }
+            }
+            // NSConcreteTask.waitUntilExit can hang after its exit event races
+            // with shutdown. Only our direct child is checked/signalled above.
         }
         process = nil
         stdin = nil
@@ -239,12 +326,17 @@ actor CodexAppServerClient {
             )
         }
         defer { timeout.cancel() }
-        return try await withCheckedThrowingContinuation { continuation in
-            pending[id] = continuation
-            stdin.write(data)
-            stdin.write(Data([0x0A]))
-        }
+        try Task.checkCancellation()
+        return try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { continuation in
+                pending[id] = continuation
+                stdin.write(data)
+                stdin.write(Data([0x0A]))
+            }
+        } onCancel: { Task { await self.cancelRequest(id: id) } }
     }
+
+    private func cancelRequest(id: Int) { pending.removeValue(forKey: id)?.resume(throwing: CancellationError()) }
 
     private func notify(method: String) {
         guard let stdin, let data = try? JSONSerialization.data(withJSONObject: ["method": method]) else { return }
@@ -252,7 +344,8 @@ actor CodexAppServerClient {
         stdin.write(Data([0x0A]))
     }
 
-    private func receive(_ data: Data) {
+    private func receive(_ data: Data, pid: Int32) {
+        guard process?.processIdentifier == pid else { return }
         buffer.append(data)
         while let newline = buffer.firstIndex(of: 0x0A) {
             let line = buffer.prefix(upTo: newline)
@@ -262,6 +355,15 @@ actor CodexAppServerClient {
     }
 
     private func handleLine(_ line: Data) {
+        if let message = try? JSONSerialization.jsonObject(with: line) as? [String: Any],
+           message["method"] as? String == "account/login/completed", let params = message["params"],
+           let data = try? JSONSerialization.data(withJSONObject: params) {
+            if let waiter = loginWaiter {
+                loginWaiter = nil
+                waiter.resume(returning: data)
+            } else if loginNotifications.count < 8 { loginNotifications.append(data) }
+            return
+        }
         guard
             let value = try? JSONSerialization.jsonObject(with: line) as? [String: Any],
             let id = value["id"] as? Int,
@@ -282,6 +384,7 @@ actor CodexAppServerClient {
     private func handleTermination(pid: Int32) {
         guard process?.processIdentifier == pid else { return }
         failPending(with: CodexAppServerError.server("Codex App Server stopped unexpectedly."))
+        failLogin(with: LoginSwitchError.signInFailed)
     }
 
     private func failPending(with error: Error) {

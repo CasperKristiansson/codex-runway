@@ -16,54 +16,22 @@ struct CodexLoginConfiguration {
 }
 
 @MainActor
-struct CodexProcessGuard {
-    static func isCodexExecutable(_ path: String) -> Bool {
-        let name = URL(fileURLWithPath: path).lastPathComponent.lowercased()
-        return name == "codex" || name == "codex-cli" || name == "codex.exe" || name == "codex-cli.exe"
-            || path.contains("/Codex.app/") || path.contains("/ChatGPT.app/")
-            || path.contains("/CodexCLI.app/")
-    }
-
-    static func assertClosed() throws {
-        var clients = Set(NSWorkspace.shared.runningApplications.compactMap { app -> String? in
-            guard ["com.openai.codex", "com.openai.chat"].contains(app.bundleIdentifier ?? "") else { return nil }
-            return app.localizedName ?? "Codex"
-        })
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/bin/ps")
-        // Executable paths only: never inspect or expose arguments or secrets.
-        process.arguments = ["-axo", "comm="]
-        let output = Pipe()
-        process.standardOutput = output
-        process.standardError = FileHandle.nullDevice
-        do { try process.run() } catch { throw LoginSwitchError.processCheckFailed }
-        let data = output.fileHandleForReading.readDataToEndOfFile()
-        process.waitUntilExit()
-        guard process.terminationStatus == 0, let listing = String(data: data, encoding: .utf8) else {
-            throw LoginSwitchError.processCheckFailed
-        }
-        for line in listing.split(separator: "\n") {
-            let path = line.trimmingCharacters(in: .whitespaces)
-            if isCodexExecutable(path) { clients.insert("Codex desktop or CLI") }
-        }
-        guard clients.isEmpty else { throw LoginSwitchError.clientsRunning(clients.sorted()) }
-    }
-}
-
-@MainActor
 final class CodexLoginSwitcher {
     let authFile: CodexAuthFile
     private let vault: any SavedLoginStore
     private let assertClosed: () throws -> Void
     private let now: () -> Date
+    private let recovery: any LoginRecoveryStore
 
     init(home: URL = CodexAuthFile.defaultHome, vault: (any SavedLoginStore)? = nil,
-         assertClosed: @escaping () throws -> Void = { try CodexProcessGuard.assertClosed() },
+         recovery: (any LoginRecoveryStore)? = nil,
+         assertClosed: (() throws -> Void)? = nil,
          now: @escaping () -> Date = { .now }) {
         let home = home.standardizedFileURL.resolvingSymlinksInPath()
         self.authFile = CodexAuthFile(home: home)
         self.vault = vault ?? KeychainSavedLoginStore(home: home)
-        self.assertClosed = assertClosed
+        self.assertClosed = assertClosed ?? { try CodexProcessGuard.assertClosed(home: home) }
+        self.recovery = recovery ?? KeychainLoginRecoveryStore(home: home)
         self.now = now
     }
 
@@ -76,19 +44,58 @@ final class CodexLoginSwitcher {
         }
     }
     func profiles() throws -> [SavedLoginProfile] { try vault.profiles() }
-    func forget(id: String) throws { try vault.remove(id: id) }
+    func forget(id: String) throws {
+        guard try !hasPendingRecovery() else { throw LoginSwitchError.recoveryRequired }
+        try vault.remove(id: id)
+    }
+    func hasPendingRecovery() throws -> Bool { try recovery.load() != nil }
+
+    /// Validate the target and filesystem before asking the desktop to quit.
+    func preflight(id: String, configuration: CodexLoginConfiguration) throws -> Bool {
+        guard try !hasPendingRecovery() else { throw LoginSwitchError.recoveryRequired }
+        let target = try vault.load(id: id)
+        let cache = try CodexLoginCache(target.credentials)
+        guard cache.matches(target.profile, home: authFile.home) else { throw LoginSwitchError.invalidCredentials }
+        try configuration.validate(cache)
+        guard let current = try authFile.read() else { return false }
+        return try CodexLoginCache(current).matches(target.profile, home: authFile.home)
+    }
+
+    func importLogin(_ data: Data, configuration: CodexLoginConfiguration) throws -> SavedLoginProfile {
+        let lock = try authFile.acquireOperationLock()
+        defer { try? lock.close() }
+        guard try !hasPendingRecovery() else { throw LoginSwitchError.recoveryRequired }
+        let cache = try CodexLoginCache(data)
+        try configuration.validate(cache)
+        let profile = cache.profile(home: authFile.home, now: now())
+        // Adding the currently active identity must retain its freshest token chain.
+        if let current = try authFile.read(), let active = try? CodexLoginCache(current), active.matches(profile, home: authFile.home) {
+            throw LoginSwitchError.alreadyCurrentLogin
+        }
+        try vault.save(SavedCodexLogin(profile: profile, credentials: data))
+        return profile
+    }
+
+    func syncCurrentIfSaved() throws {
+        let lock = try authFile.acquireOperationLock()
+        defer { try? lock.close() }
+        guard try !hasPendingRecovery(), let data = try authFile.read(), let cache = try? CodexLoginCache(data),
+              try vault.profiles().contains(where: { cache.matches($0, home: authFile.home) }) else { return }
+        guard try authFile.read() == data else { return }
+        try vault.save(SavedCodexLogin(profile: cache.profile(home: authFile.home, now: now()), credentials: data))
+    }
 
     @discardableResult
     func saveCurrent(configuration: CodexLoginConfiguration) throws -> SavedLoginProfile {
-        try assertClosed()
+        guard try !hasPendingRecovery() else { throw LoginSwitchError.recoveryRequired }
         try configuration.validate()
         let lock = try authFile.acquireOperationLock()
         defer { try? lock.close() }
+        guard try !hasPendingRecovery() else { throw LoginSwitchError.recoveryRequired }
         guard let data = try authFile.read() else { throw LoginSwitchError.missingCredentials }
         let cache = try CodexLoginCache(data)
         try configuration.validate(cache)
         let profile = cache.profile(home: authFile.home, now: now())
-        try assertClosed()
         guard try authFile.read() == data else { throw LoginSwitchError.credentialsChanged }
         try vault.save(SavedCodexLogin(profile: profile, credentials: data))
         return profile
@@ -96,11 +103,14 @@ final class CodexLoginSwitcher {
 
     @discardableResult
     func activate(id: String, configuration: CodexLoginConfiguration,
-                  verify: () async throws -> AccountReadResponse) async throws -> SavedLoginProfile {
+                  verify: () async throws -> AccountReadResponse,
+                  progress: (String) -> Void = { _ in }) async throws -> SavedLoginProfile {
         try assertClosed()
+        guard try !hasPendingRecovery() else { throw LoginSwitchError.recoveryRequired }
         try configuration.validate()
         let lock = try authFile.acquireOperationLock()
         defer { try? lock.close() }
+        guard try !hasPendingRecovery() else { throw LoginSwitchError.recoveryRequired }
         let target = try vault.load(id: id)
         let cache = try CodexLoginCache(target.credentials)
         guard cache.matches(target.profile, home: authFile.home) else { throw LoginSwitchError.invalidCredentials }
@@ -128,7 +138,17 @@ final class CodexLoginSwitcher {
                 } catch { throw LoginSwitchError.currentVerificationFailed }
             }
         }
-        try authFile.replace(with: target.credentials, expecting: original, assertClosed: assertClosed)
+        try Task.checkCancellation()
+        progress("Switching account…")
+        try recovery.save(LoginRecoveryRecord(target: target.profile, original: original))
+        do {
+            try authFile.replace(with: target.credentials, expecting: original, assertClosed: assertClosed)
+        } catch {
+            // A failed pre-commit assertion did not change the credentials.
+            try recovery.clear()
+            throw error
+        }
+        progress("Verifying selected account…")
         do {
             try assertClosed()
             let verified = try await verify()
@@ -142,6 +162,7 @@ final class CodexLoginSwitcher {
             }
             let profile = refreshedCache.profile(home: authFile.home, now: now())
             try vault.save(SavedCodexLogin(profile: profile, credentials: refreshed))
+            try recovery.clear()
             return profile
         } catch {
             // Never overwrite a third party's replacement, or change auth while
@@ -157,6 +178,54 @@ final class CodexLoginSwitcher {
                 // anyway; its cache was already saved before the commit.
                 try? vault.save(SavedCodexLogin(profile: currentCache.profile(home: authFile.home, now: now()), credentials: current))
                 try authFile.replace(with: original, expecting: current, assertClosed: assertClosed)
+                try recovery.clear()
+            } catch { throw LoginSwitchError.recoveryRequired }
+            throw LoginSwitchError.verificationFailed
+        }
+    }
+
+    /// Explicit recovery verifies the login currently on disk. An unrelated
+    /// replacement is preserved; only the interrupted target may be rolled back.
+    func recover(configuration: CodexLoginConfiguration, verify: () async throws -> AccountReadResponse) async throws -> SavedLoginProfile? {
+        try assertClosed()
+        let lock = try authFile.acquireOperationLock()
+        defer { try? lock.close() }
+        guard let record = try recovery.load() else { return nil }
+        let originalCache = try record.original.map { try CodexLoginCache($0) }
+        try configuration.validate()
+        let current = try authFile.read()
+        if current == record.original {
+            try recovery.clear()
+            return originalCache?.profile(home: authFile.home, now: now())
+        }
+        guard let current, let cache = try? CodexLoginCache(current) else { throw LoginSwitchError.recoveryRequired }
+        try configuration.validate(cache)
+        if let originalCache, cache.accountID == originalCache.accountID, cache.email == originalCache.email {
+            let profile = cache.profile(home: authFile.home, now: now())
+            try vault.save(SavedCodexLogin(profile: profile, credentials: current))
+            try recovery.clear()
+            return profile
+        }
+        let currentProfile = cache.profile(home: authFile.home, now: now())
+        do {
+            let identity = try await verify()
+            try assertClosed()
+            guard identity.account?.type == "chatgpt", identity.account?.email?.lowercased() == cache.email,
+                  let latest = try authFile.read(), let updated = try? CodexLoginCache(latest),
+                  updated.matches(currentProfile, home: authFile.home) else { throw LoginSwitchError.verificationFailed }
+            let profile = updated.profile(home: authFile.home, now: now())
+            try vault.save(SavedCodexLogin(profile: profile, credentials: latest))
+            try recovery.clear()
+            return profile
+        } catch {
+            do {
+                try assertClosed()
+                if let originalCache { try configuration.validate(originalCache) }
+                guard let latest = try authFile.read(), let updated = try? CodexLoginCache(latest),
+                      updated.matches(record.target, home: authFile.home) else { throw LoginSwitchError.recoveryRequired }
+                try? vault.save(SavedCodexLogin(profile: updated.profile(home: authFile.home, now: now()), credentials: latest))
+                try authFile.replace(with: record.original, expecting: latest, assertClosed: assertClosed)
+                try recovery.clear()
             } catch { throw LoginSwitchError.recoveryRequired }
             throw LoginSwitchError.verificationFailed
         }

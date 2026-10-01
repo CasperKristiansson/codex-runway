@@ -18,6 +18,22 @@ private final class MemoryLoginStore: SavedLoginStore {
 }
 
 @MainActor
+private final class MemoryRecoveryStore: LoginRecoveryStore {
+    var record: LoginRecoveryRecord?
+    var failSave = false
+    var failClear = false
+    func load() throws -> LoginRecoveryRecord? { record }
+    func save(_ record: LoginRecoveryRecord) throws {
+        if failSave { throw LoginSwitchError.keychain(-1) }
+        self.record = record
+    }
+    func clear() throws {
+        if failClear { throw LoginSwitchError.keychain(-1) }
+        record = nil
+    }
+}
+
+@MainActor
 private final class Fixture {
     var open = false
     var checks = 0
@@ -28,6 +44,16 @@ private final class Fixture {
         try hook?()
         if open || checks == failAt { throw LoginSwitchError.clientsRunning(["Synthetic Codex"]) }
     }
+}
+
+@MainActor
+private final class LifecycleFixture {
+    var closes = 0
+    var opens = 0
+    var isOpen = true
+    var declineQuit = false
+    var failLaunch = false
+    var browserOpened = false
 }
 
 @main
@@ -64,15 +90,15 @@ struct LoginChecks {
         let config = CodexLoginConfiguration(storage: "file")
         let vault = MemoryLoginStore()
         let fixture = Fixture()
-        let switcher = CodexLoginSwitcher(home: root, vault: vault, assertClosed: { try fixture.assertClosed() })
+        let recovery = MemoryRecoveryStore()
+        let switcher = CodexLoginSwitcher(home: root, vault: vault, recovery: recovery, assertClosed: { try fixture.assertClosed() })
         func response(_ email: String) -> AccountReadResponse {
             AccountReadResponse(account: ChatGPTAccount(type: "chatgpt", email: email, planType: "pro"))
         }
         try write(first)
         fixture.open = true
-        do { try switcher.saveCurrent(configuration: config); preconditionFailure("Open app must block capture") }
-        catch LoginSwitchError.clientsRunning {}
-        try check(vault.values.isEmpty && (try read()) == first)
+        try switcher.saveCurrent(configuration: config)
+        try check(vault.values.count == 1 && (try read()) == first)
         fixture.open = false
         let firstProfile = try switcher.saveCurrent(configuration: config)
         try write(second)
@@ -130,6 +156,7 @@ struct LoginChecks {
         } catch LoginSwitchError.recoveryRequired {}
         try check((try read()) == third)
         try write(previous)
+        _ = try await switcher.recover(configuration: config) { response("first@example.com") }
 
         // Recheck the process assertion immediately before atomic replacement.
         fixture.checks = 0
@@ -149,6 +176,7 @@ struct LoginChecks {
         try check((try read()) == rotatedSecond)
         fixture.open = false
         try write(previous)
+        _ = try await switcher.recover(configuration: config) { response("first@example.com") }
 
         for storage in ["keyring", "auto", "ephemeral", "unknown"] {
             do { try switcher.saveCurrent(configuration: CodexLoginConfiguration(storage: storage)); preconditionFailure() }
@@ -206,7 +234,7 @@ struct LoginChecks {
 
         precondition(CodexProcessGuard.isCodexExecutable("/opt/homebrew/bin/codex"))
         precondition(CodexProcessGuard.isCodexExecutable("/Applications/Renamed.app/Contents/Resources/codex-cli"))
-        precondition(CodexProcessGuard.isCodexExecutable("/Applications/ChatGPT.app/Contents/MacOS/ChatGPT"))
+        precondition(!CodexProcessGuard.isCodexExecutable("/Applications/ChatGPT.app/Contents/MacOS/ChatGPT"))
         precondition(!CodexProcessGuard.isCodexExecutable("/Applications/Codex Runway.app/Contents/MacOS/CodexRunway"))
 
         // Store-level exclusion covers manual, scheduled and queued refreshes.
@@ -224,7 +252,7 @@ struct LoginChecks {
                 await store.refreshAnalyticsForSignedInAccount()
                 try await Task.sleep(for: .milliseconds(10))
                 return config
-            }, verifyLogin: { response("second@example.com") }, readAccount: {
+            }, verifyLogin: { response("second@example.com") }, closeDesktop: { fixture.open = false; return false }, openDesktop: {}, readAccount: {
                 readCalls += 1
                 throw CodexAppServerError.invalidResponse
             })
@@ -238,6 +266,149 @@ struct LoginChecks {
         let preferences = defaults.dictionaryRepresentation()
         precondition(!preferences.keys.contains { $0.localizedCaseInsensitiveContains("credential") || $0.localizedCaseInsensitiveContains("token") })
         try check(!(try fm.contentsOfDirectory(atPath: root.path)).contains { $0.hasPrefix(".runway-auth-") && $0.hasSuffix(".tmp") })
+        // Scope decisions require positive evidence of a different credential home.
+        let independent = CodexClientProcess(pid: 999, parent: 1, executable: "/opt/homebrew/bin/codex", home: root.appendingPathComponent("independent"))
+        precondition(!CodexProcessGuard.blocks(independent, home: root, desktopPIDs: []))
+        precondition(CodexProcessGuard.blocks(CodexClientProcess(pid: 999, parent: 1, executable: independent.executable, home: nil), home: root, desktopPIDs: []))
+        precondition(CodexProcessGuard.blocks(CodexClientProcess(pid: 999, parent: 1, executable: independent.executable, home: root), home: root, desktopPIDs: []))
+        precondition(CodexProcessGuard.blocks(independent, home: root, desktopPIDs: [999]))
+        do { try await CodexDesktopLifecycle.waitForExit(timeout: .milliseconds(1)) { true }; preconditionFailure() }
+        catch LoginSwitchError.quitTimedOut {}
+        let quitWait = Task { try await CodexDesktopLifecycle.waitForExit { true } }
+        quitWait.cancel()
+        do { try await quitWait.value; preconditionFailure() } catch is CancellationError {}
+
+        // Managed desktop lifecycle and failure outcomes without touching a real app.
+        try vault.save(SavedCodexLogin(profile: firstProfile, credentials: previous))
+        try write(previous)
+        let lifecycle = LifecycleFixture()
+        let lifecycleStore = RunwayStore(defaults: defaults, analyticsEnabled: false, loginSwitcher: switcher,
+            readLoginConfiguration: { config }, verifyLogin: {
+                precondition(recovery.record != nil)
+                precondition(!lifecycle.isOpen)
+                return response("second@example.com")
+            }, closeDesktop: {
+                lifecycle.closes += 1
+                if lifecycle.declineQuit { throw LoginSwitchError.quitFailed }
+                let wasOpen = lifecycle.isOpen
+                lifecycle.isOpen = false
+                fixture.open = false
+                return wasOpen
+            }, openDesktop: {
+                lifecycle.opens += 1
+                if lifecycle.failLaunch { throw LoginSwitchError.reopenFailed }
+                lifecycle.isOpen = true
+            }, desktopIsOpen: { lifecycle.isOpen }, signIn: { _ in third })
+        fixture.open = true
+        await lifecycleStore.switchLogin(id: firstProfile.id)
+        precondition(lifecycle.closes == 0 && lifecycle.opens == 0 && !lifecycleStore.loginStatusIsError)
+        lifecycle.declineQuit = true
+        await lifecycleStore.switchLogin(id: secondProfile.id)
+        try check(lifecycle.closes == 1 && lifecycle.opens == 0 && lifecycleStore.loginStatusIsError && (try read()) == previous)
+        lifecycle.declineQuit = false
+        lifecycle.failLaunch = true
+        await lifecycleStore.switchLogin(id: secondProfile.id)
+        try check(lifecycle.closes == 2 && lifecycle.opens == 1 && lifecycleStore.loginStatusIsError && (try read()) == rotatedSecond)
+        precondition(recovery.record == nil && !lifecycleStore.loginRecoveryPending)
+        precondition(lifecycleStore.loginStatusMessage?.contains("Open Codex manually") == true)
+        // Re-select a closed active account lifecycle.opens it without another quit.
+        lifecycle.failLaunch = false
+        await lifecycleStore.switchLogin(id: secondProfile.id)
+        precondition(lifecycle.closes == 2 && lifecycle.opens == 2 && !lifecycleStore.loginStatusIsError)
+        let beforeAdd = try read()
+        await lifecycleStore.addLogin()
+        try check((try read()) == beforeAdd && lifecycleStore.savedLogins.contains { $0.email == "third@example.com" })
+
+        // A cancellation during graceful quit cannot reach the auth transaction.
+        let cancellingStore = RunwayStore(defaults: defaults, analyticsEnabled: false, loginSwitcher: switcher,
+            readLoginConfiguration: { config }, closeDesktop: {
+                try await CodexDesktopLifecycle.waitForExit { true }
+                return true
+            }, openDesktop: {})
+        let switching = Task { await cancellingStore.switchLogin(id: firstProfile.id) }
+        while !cancellingStore.loginCanCancel { try await Task.sleep(for: .milliseconds(1)) }
+        cancellingStore.cancelLoginOperation()
+        await switching.value
+        try check((try read()) == beforeAdd && recovery.record == nil && !cancellingStore.isManagingLogin)
+        precondition(cancellingStore.loginStatusMessage?.contains("Cancelled") == true)
+
+        // Durable recovery survives a new switcher/store instance and blocks refresh.
+        fixture.open = false
+        try write(previous)
+        try recovery.save(LoginRecoveryRecord(target: secondProfile, original: previous))
+        let restarted = CodexLoginSwitcher(home: root, vault: vault, recovery: recovery, assertClosed: { try fixture.assertClosed() })
+        _ = try await restarted.recover(configuration: config) { preconditionFailure("Pre-commit crash must not authenticate") }
+        try check((try read()) == previous && recovery.record == nil)
+        try recovery.save(LoginRecoveryRecord(target: secondProfile, original: previous))
+        try write(rotatedSecond)
+        var recoveryReads = 0
+        let recoveryStore = RunwayStore(defaults: defaults, analyticsEnabled: false, loginSwitcher: restarted,
+            readLoginConfiguration: { config }, verifyLogin: {
+                try write(try credentials("second@example.com", account: "account-two", rotation: 20))
+                return response("second@example.com")
+            }, closeDesktop: { false }, openDesktop: {}, readAccount: {
+                recoveryReads += 1
+                throw CodexAppServerError.invalidResponse
+            })
+        recoveryStore.reloadSavedLogins()
+        precondition(recoveryStore.loginRecoveryPending)
+        let didRefresh = await recoveryStore.refreshActiveAccount()
+        precondition(!didRefresh && recoveryReads == 0)
+        await recoveryStore.recoverLogin()
+        try check(!recoveryStore.loginRecoveryPending && !recoveryStore.loginStatusIsError && recovery.record == nil)
+        try check(vault.values[secondProfile.id]?.credentials == (try read()))
+        try recovery.save(LoginRecoveryRecord(target: secondProfile, original: previous))
+        try write(rotatedSecond)
+        do { _ = try await restarted.recover(configuration: config) { throw LoginSwitchError.invalidCredentials }; preconditionFailure() }
+        catch LoginSwitchError.verificationFailed {}
+        try check((try read()) == previous && recovery.record == nil)
+        // Preserve a third party's login; explicit recovery can verify/adopt it.
+        try recovery.save(LoginRecoveryRecord(target: secondProfile, original: previous))
+        try write(third)
+        do { _ = try await restarted.recover(configuration: config) { throw LoginSwitchError.invalidCredentials }; preconditionFailure() }
+        catch LoginSwitchError.recoveryRequired {}
+        try check((try read()) == third && recovery.record != nil)
+        let adopted = try await restarted.recover(configuration: config) { response("third@example.com") }
+        try check(adopted?.email == "third@example.com" && (try read()) == third && recovery.record == nil)
+        // Failure to persist the journal prevents a credential replacement.
+        try write(previous)
+        recovery.failSave = true
+        do { try await restarted.activate(id: secondProfile.id, configuration: config) { response("second@example.com") }; preconditionFailure() }
+        catch LoginSwitchError.keychain {}
+        recovery.failSave = false
+        try check((try read()) == previous)
+
+        // Isolated onboarding removes the private directory after success, failure and cancellation.
+        var onboardingHome: URL?
+        let imported = try await CodexAccountOnboarding().add(configuration: config) { home, _ in
+            onboardingHome = home
+            precondition(home != root)
+            let mode = try fm.attributesOfItem(atPath: home.path)[.posixPermissions] as? Int
+            precondition(mode == 0o700)
+            let file = CodexAuthFile(home: home)
+            try file.replace(with: third, expecting: nil, assertClosed: {})
+        }
+        try check(imported == third && !fm.fileExists(atPath: onboardingHome!.path) && (try read()) == previous)
+        do {
+            _ = try await CodexAccountOnboarding().add(configuration: config) { home, _ in
+                onboardingHome = home
+                throw LoginSwitchError.signInFailed
+            }
+            preconditionFailure()
+        } catch LoginSwitchError.signInFailed {}
+        precondition(!fm.fileExists(atPath: onboardingHome!.path))
+        let onboarding = Task {
+            try await CodexAccountOnboarding().add(configuration: config) { home, _ in
+                onboardingHome = home
+                try await Task.sleep(for: .seconds(30))
+            }
+        }
+        let earlierHome = onboardingHome
+        while onboardingHome == earlierHome { try await Task.sleep(for: .milliseconds(1)) }
+        onboarding.cancel()
+        do { _ = try await onboarding.value; preconditionFailure() } catch is CancellationError {}
+        precondition(!fm.fileExists(atPath: onboardingHome!.path))
+
         // Exercise the actual App Server transport with a synthetic child.
         // Sequential reuse must not receive a stale child's exit notification.
         let server = root.appendingPathComponent("synthetic-app-server")
@@ -265,9 +436,93 @@ struct LoginChecks {
             let identity = try await client.verifyLogin(executablePath: server.path)
             precondition(identity.account?.email == "second@example.com")
         }
+        // Real transport: isolated environment, early completion notification,
+        // normal OAuth params, and cancellation while waiting for the browser.
+        let loginServer = root.appendingPathComponent("synthetic-login-server")
+        let encodedThird = third.base64EncodedString()
+        let loginProgram = """
+        #!/usr/bin/python3
+        import base64, json, os, sys
+        for line in sys.stdin:
+            request = json.loads(line)
+            if 'id' not in request: continue
+            method = request['method']
+            if method == 'initialize': result = {}
+            elif method == 'account/login/start':
+                assert request['params']['type'] == 'chatgpt'
+                assert 'cli_auth_credentials_store="file"' in sys.argv
+                home = os.environ['CODEX_HOME']
+                assert home != '\(root.path)'
+                with open(os.path.join(home, 'auth.json'), 'wb') as f:
+                    f.write(base64.b64decode('\(encodedThird)'))
+                os.chmod(os.path.join(home, 'auth.json'), 0o600)
+                if 'stall' not in sys.argv[0]:
+                    print(json.dumps({'method': 'account/login/completed', 'params': {'loginId': 'synthetic-login', 'success': True}}), flush=True)
+                result = {'type': 'chatgpt', 'loginId': 'synthetic-login', 'authUrl': 'https://auth.openai.com/oauth/authorize?synthetic=1'}
+            elif method == 'account/read':
+                assert request['params']['refreshToken'] is False
+                result = {'account': {'type': 'chatgpt', 'email': 'third@example.com', 'planType': 'pro'}}
+            else: raise RuntimeError('Unexpected method')
+            print(json.dumps({'id': request['id'], 'result': result}), flush=True)
+        """
+        try Data(loginProgram.utf8).write(to: loginServer)
+        try fm.setAttributes([.posixPermissions: 0o700], ofItemAtPath: loginServer.path)
+        let transportLogin = try await CodexAccountOnboarding().add(configuration: config) { home, configuration in
+            try await client.signIn(home: home, configuration: configuration, executablePath: loginServer.path, openBrowser: { url in
+                precondition(url.host == "auth.openai.com")
+            })
+        }
+        try check(transportLogin == third && (try read()) == previous)
+        let stalledServer = root.appendingPathComponent("synthetic-login-stall-server")
+        try Data(loginProgram.utf8).write(to: stalledServer)
+        try fm.setAttributes([.posixPermissions: 0o700], ofItemAtPath: stalledServer.path)
+        let stalledLogin = Task {
+            try await CodexAccountOnboarding().add(configuration: config) { home, configuration in
+                onboardingHome = home
+                try await client.signIn(home: home, configuration: configuration, executablePath: stalledServer.path, openBrowser: { _ in lifecycle.browserOpened = true })
+            }
+        }
+        while !lifecycle.browserOpened { try await Task.sleep(for: .milliseconds(1)) }
+        stalledLogin.cancel()
+        do { _ = try await stalledLogin.value; preconditionFailure() } catch is CancellationError {}
+        precondition(!fm.fileExists(atPath: onboardingHome!.path))
+        // The cancelled client's child has exited; a new request must work immediately.
+        _ = try await client.verifyLogin(executablePath: server.path)
+        // Platform binaries can hide their environment. Use our own disposable
+        // executable to test positive scope detection, rather than /bin/sleep.
+        let scopedSource = root.appendingPathComponent("scoped-client.c")
+        let scopedExecutable = root.appendingPathComponent("scoped-client")
+        try Data("#include <stdlib.h>\n#include <unistd.h>\nint main(void) { if (!getenv(\"CODEX_HOME\")) return 42; sleep(10); return 0; }\n".utf8).write(to: scopedSource)
+        let compiler = Process()
+        compiler.executableURL = URL(fileURLWithPath: "/usr/bin/cc")
+        compiler.arguments = [scopedSource.path, "-o", scopedExecutable.path]
+        try compiler.run()
+        compiler.waitUntilExit()
+        precondition(compiler.terminationStatus == 0)
+        let scopedChild = Process()
+        scopedChild.executableURL = scopedExecutable
+        scopedChild.environment = ["CODEX_HOME": root.path]
+        try scopedChild.run()
+        defer { if scopedChild.isRunning { scopedChild.terminate(); scopedChild.waitUntilExit() } }
+        if let detected = CodexProcessGuard.credentialHome(pid: scopedChild.processIdentifier) {
+            precondition(detected.path == root.path)
+        } else {
+            // The sandbox may deny KERN_PROCARGS2. The production guard must then block.
+            precondition(CodexProcessGuard.blocks(CodexClientProcess(pid: scopedChild.processIdentifier, parent: 1, executable: "codex", home: nil), home: root, desktopPIDs: []))
+            precondition(ProcessInfo.processInfo.environment["RUNWAY_PROCESS_SCOPE_CHECK"] != "1")
+        }
+        scopedChild.terminate()
+        scopedChild.waitUntilExit()
+
         if ProcessInfo.processInfo.environment["RUNWAY_KEYCHAIN_CHECK"] == "1" {
             // Disposable service scope; never enumerate the real Codex home.
             let keychain = KeychainSavedLoginStore(home: root)
+            let keychainRecovery = KeychainLoginRecoveryStore(home: root)
+            defer { try? keychainRecovery.clear() }
+            try keychainRecovery.save(LoginRecoveryRecord(target: secondProfile, original: previous))
+            try check(try keychainRecovery.load()?.original == previous)
+            // A new instance sees the same durable record; profile listings exclude it.
+            try check(try KeychainLoginRecoveryStore(home: root).load()?.target == secondProfile)
             defer { try? keychain.remove(id: firstProfile.id); try? keychain.remove(id: secondProfile.id) }
             try keychain.save(SavedCodexLogin(profile: firstProfile, credentials: first))
             try check(try keychain.profiles().contains { $0.id == firstProfile.id })
@@ -279,6 +534,8 @@ struct LoginChecks {
             try keychain.remove(id: firstProfile.id)
             try keychain.remove(id: secondProfile.id)
             try check(try keychain.profiles().isEmpty)
+            try keychainRecovery.clear()
+            try check(try keychainRecovery.load() == nil)
             print("Disposable macOS Keychain create, list, read, update, and cleanup checks passed")
         }
         if ProcessInfo.processInfo.environment["RUNWAY_PROCESS_GUARD_CHECK"] == "1" {
@@ -289,6 +546,6 @@ struct LoginChecks {
                 print("Production process guard: running Codex clients blocked")
             }
         }
-        print("Synthetic saved-login, process guard, token rotation, rollback, file safety, and refresh exclusion checks passed")
+        print("Synthetic managed restart, sign-in transport/cancellation, scoped process checks, crash recovery, rotation, rollback, file safety, and refresh exclusion checks passed")
     }
 }

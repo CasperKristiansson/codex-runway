@@ -51,16 +51,25 @@ struct SettingsView: View {
     private var accountSettings: some View {
         Form {
             Section("Saved Logins") {
-                Text("Sign in normally to each account once, quit Codex, then save its login here. Quit Codex and its CLI clients before switching.")
+                Text("Add each account once. When you switch, Runway closes Codex normally, selects the account, and reopens it. Finish or stop active tasks if Codex asks.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
                 HStack {
+                    Button("Add Account…") { Task { await store.addLogin() } }
+                        .disabled(store.loginActionsDisabled || store.loginRecoveryPending)
                     Button("Save Current Login") { Task { await store.saveCurrentLogin() } }
-                        .disabled(store.loginActionsDisabled)
+                        .disabled(store.loginActionsDisabled || store.loginRecoveryPending)
                     if store.isManagingLogin { ProgressView().controlSize(.small) }
+                    if store.loginCanCancel {
+                        Button("Cancel") { store.cancelLoginOperation() }
+                    }
                     Spacer()
                     Button("Reload") { store.reloadSavedLogins() }
                         .disabled(store.isManagingLogin)
+                }
+                if store.loginRecoveryPending {
+                    Button("Recover Switch") { Task { await store.recoverLogin() } }
+                        .disabled(store.loginActionsDisabled)
                 }
                 ForEach(store.savedLogins) { login in
                     HStack {
@@ -71,10 +80,10 @@ struct SettingsView: View {
                         }
                         .frame(maxWidth: .infinity, alignment: .leading)
                         Button("Switch & Open") { Task { await store.switchLogin(id: login.id) } }
-                            .disabled(store.loginActionsDisabled)
+                            .disabled(store.loginActionsDisabled || store.loginRecoveryPending)
                             .accessibilityLabel("Switch to \(login.email) and open Codex")
                         Button("Forget") { store.forgetLogin(id: login.id) }
-                            .disabled(store.isManagingLogin)
+                            .disabled(store.isManagingLogin || store.loginRecoveryPending)
                             .help("Remove this saved login from Keychain; keep the current login and account history")
                     }
                 }

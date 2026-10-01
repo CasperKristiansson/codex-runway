@@ -83,6 +83,15 @@ struct MenuBarView: View {
             }
 
             HStack(spacing: 8) {
+                if store.loginCanCancel {
+                    Button("Cancel") { store.cancelLoginOperation() }
+                        .controlSize(.small)
+                }
+                if store.loginRecoveryPending {
+                    Button("Recover Switch") { Task { await store.recoverLogin() } }
+                        .disabled(store.loginActionsDisabled)
+                        .controlSize(.small)
+                }
                 Text(store.savedLogins.isEmpty ? "Auto-refresh · 15 min" : "15 min refresh")
                     .font(.caption)
                     .foregroundStyle(.secondary)
@@ -91,7 +100,7 @@ struct MenuBarView: View {
                 if !store.savedLogins.isEmpty {
                     Menu {
                         ForEach(store.savedLogins) { login in
-                            Button("Switch & Open · \(login.email)") {
+                            Button("Switch to \(login.email)") {
                                 Task { await store.switchLogin(id: login.id) }
                             }
                         }
@@ -100,8 +109,8 @@ struct MenuBarView: View {
                     }
                     .menuStyle(.borderlessButton)
                     .fixedSize()
-                    .disabled(store.loginActionsDisabled)
-                    .help("Quit Codex before switching to a saved login")
+                    .disabled(store.loginActionsDisabled || store.loginRecoveryPending)
+                    .help("Select a saved account; Runway closes and reopens Codex for you")
                 }
                 Button(action: openSettings) {
                     Label("Settings", systemImage: "gearshape")
@@ -120,7 +129,7 @@ struct MenuBarView: View {
                         }
                 }
                 .buttonStyle(FooterButtonStyle(prominent: true))
-                .disabled(store.isRefreshing || store.isManagingLogin)
+                .disabled(store.isRefreshing || store.isManagingLogin || store.loginRecoveryPending)
                 .keyboardShortcut(.return, modifiers: [])
             }
         }
