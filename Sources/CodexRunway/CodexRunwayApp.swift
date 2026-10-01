@@ -18,6 +18,7 @@ final class CodexRunwayApp: NSObject, NSApplicationDelegate {
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         menuController = StatusPanelController(store: store, backupManager: backupManager)
+        store.reloadSavedLogins()
         store.startAutomaticRefresh()
         backupManager.start()
     }
@@ -67,6 +68,13 @@ struct MenuBarView: View {
 
             Divider()
 
+            if let message = store.loginStatusMessage {
+                Text(message)
+                    .font(.caption)
+                    .foregroundStyle(store.loginStatusIsError ? Color.red : Color.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
             if let error = store.refreshError {
                 Text(error)
                     .font(.caption)
@@ -75,11 +83,26 @@ struct MenuBarView: View {
             }
 
             HStack(spacing: 8) {
-                Text("Auto-refresh · 15 min")
+                Text(store.savedLogins.isEmpty ? "Auto-refresh · 15 min" : "15 min refresh")
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .help("Current account refreshes every 15 minutes. Other accounts show their last saved status.")
                 Spacer()
+                if !store.savedLogins.isEmpty {
+                    Menu {
+                        ForEach(store.savedLogins) { login in
+                            Button("Switch & Open · \(login.email)") {
+                                Task { await store.switchLogin(id: login.id) }
+                            }
+                        }
+                    } label: {
+                        Label("Switch", systemImage: "arrow.triangle.2.circlepath")
+                    }
+                    .menuStyle(.borderlessButton)
+                    .fixedSize()
+                    .disabled(store.loginActionsDisabled)
+                    .help("Quit Codex before switching to a saved login")
+                }
                 Button(action: openSettings) {
                     Label("Settings", systemImage: "gearshape")
                 }
@@ -97,7 +120,7 @@ struct MenuBarView: View {
                         }
                 }
                 .buttonStyle(FooterButtonStyle(prominent: true))
-                .disabled(store.isRefreshing)
+                .disabled(store.isRefreshing || store.isManagingLogin)
                 .keyboardShortcut(.return, modifiers: [])
             }
         }

@@ -50,6 +50,42 @@ struct SettingsView: View {
 
     private var accountSettings: some View {
         Form {
+            Section("Saved Logins") {
+                Text("Sign in normally to each account once, quit Codex, then save its login here. Quit Codex and its CLI clients before switching.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                HStack {
+                    Button("Save Current Login") { Task { await store.saveCurrentLogin() } }
+                        .disabled(store.loginActionsDisabled)
+                    if store.isManagingLogin { ProgressView().controlSize(.small) }
+                    Spacer()
+                    Button("Reload") { store.reloadSavedLogins() }
+                        .disabled(store.isManagingLogin)
+                }
+                ForEach(store.savedLogins) { login in
+                    HStack {
+                        VStack(alignment: .leading, spacing: 3) {
+                            Text(login.email).font(.subheadline.weight(.medium))
+                            Text("Saved \(login.savedAt.formatted(date: .abbreviated, time: .shortened))")
+                                .font(.caption).foregroundStyle(.secondary)
+                        }
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        Button("Switch & Open") { Task { await store.switchLogin(id: login.id) } }
+                            .disabled(store.loginActionsDisabled)
+                            .accessibilityLabel("Switch to \(login.email) and open Codex")
+                        Button("Forget") { store.forgetLogin(id: login.id) }
+                            .disabled(store.isManagingLogin)
+                            .help("Remove this saved login from Keychain; keep the current login and account history")
+                    }
+                }
+                if let message = store.loginStatusMessage {
+                    Text(message).font(.caption)
+                        .foregroundStyle(store.loginStatusIsError ? Color.red : Color.secondary)
+                }
+                Text("Saved sessions stay in this Mac's Keychain and are excluded from Runway backups. Expired or revoked sessions may require signing in again. Switching never signs into other accounts in the background.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
             Section("Accounts") {
                 Text("Use the arrows to set the account order in the menu.")
                     .font(.caption)

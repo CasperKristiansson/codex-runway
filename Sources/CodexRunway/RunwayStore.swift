@@ -14,6 +14,14 @@ final class RunwayStore: ObservableObject {
     @Published var profileRefreshError: String?
     @Published private(set) var isRefreshingProfile = false
 
+    @Published private(set) var savedLogins: [SavedLoginProfile] = []
+    @Published private(set) var isManagingLogin = false
+    @Published private(set) var loginStatusMessage: String?
+    @Published private(set) var loginStatusIsError = false
+    private let loginSwitcher: CodexLoginSwitcher
+    private let readLoginConfiguration: @MainActor () async throws -> CodexLoginConfiguration
+    private let verifyLogin: @MainActor () async throws -> AccountReadResponse
+
     private let defaultsKey = "codex-runway.accounts.v1"
     var dashboardAccounts: [CodexAccount] { accounts.filter(\.isEnabled) }
     private var refreshTimer: Timer?
@@ -33,6 +41,13 @@ final class RunwayStore: ObservableObject {
          analyticsArchiveStore: AnalyticsArchiveStore = AnalyticsArchiveStore(),
          analyticsClient: AnalyticsClient = AnalyticsClient(),
          analyticsEnabled: Bool = true,
+         loginSwitcher: CodexLoginSwitcher = CodexLoginSwitcher(),
+         readLoginConfiguration: @escaping @MainActor () async throws -> CodexLoginConfiguration = {
+             try await CodexAppServerClient().readLoginConfiguration()
+         },
+         verifyLogin: @escaping @MainActor () async throws -> AccountReadResponse = {
+             try await CodexAppServerClient().verifyLogin()
+         },
          now: @escaping () -> Date = { .now },
          readProfile: @escaping @MainActor () async throws -> ActiveAccountProfile = {
              try await CodexAppServerClient().readActiveProfile()
@@ -40,6 +55,9 @@ final class RunwayStore: ObservableObject {
         try await CodexAppServerClient().readActiveAccount()
     }) {
         self.defaults = defaults
+        self.loginSwitcher = loginSwitcher
+        self.readLoginConfiguration = readLoginConfiguration
+        self.verifyLogin = verifyLogin
         self.forecastJournal = forecastJournal
         self.analyticsArchiveStore = analyticsArchiveStore
         self.analyticsClient = analyticsClient
@@ -54,6 +72,85 @@ final class RunwayStore: ObservableObject {
                 analyticsByAccount[account.id] = archive
             }
         }
+    }
+
+    var loginActionsDisabled: Bool {
+        isManagingLogin || isRefreshing || isRefreshingProfile || isRefreshingAnalytics
+    }
+
+    func reloadSavedLogins() {
+        do { savedLogins = try loginSwitcher.profiles() }
+        catch { setLoginMessage(error.localizedDescription, isError: true) }
+    }
+
+    func saveCurrentLogin() async {
+        await performLoginOperation {
+            let configuration = try await self.readLoginConfiguration()
+            let profile = try self.loginSwitcher.saveCurrent(configuration: configuration)
+            self.savedLogins = try self.loginSwitcher.profiles()
+            self.setLoginMessage("Saved login for \(profile.email).")
+        }
+    }
+
+    func switchLogin(id: String, openCodex: Bool = true) async {
+        await performLoginOperation {
+            let configuration = try await self.readLoginConfiguration()
+            let profile = try await self.loginSwitcher.activate(id: id, configuration: configuration, verify: self.verifyLogin)
+            self.activeAccountID = self.accounts.first {
+                $0.email.lowercased() == profile.email && ($0.externalAccountID == nil || $0.externalAccountID == profile.accountID)
+            }?.id
+            // A metadata-listing failure must not hide a completed switch.
+            self.reloadSavedLogins()
+            self.setLoginMessage("Selected \(profile.email). Open Codex when ready.")
+            if openCodex {
+                try self.loginSwitcher.requireCurrent(profile)
+                if let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: "com.openai.codex"),
+                   NSWorkspace.shared.open(url) {
+                    self.setLoginMessage("Selected \(profile.email). Opening Codex…")
+                } else {
+                    self.setLoginMessage("Selected \(profile.email). Open Codex manually; Runway could not launch it.")
+                }
+            }
+        }
+    }
+
+    func forgetLogin(id: String) {
+        guard !isManagingLogin else { return }
+        do {
+            try loginSwitcher.forget(id: id)
+            savedLogins = try loginSwitcher.profiles()
+            setLoginMessage("Saved login removed. The current Codex login and account history are kept.")
+        } catch { setLoginMessage(error.localizedDescription, isError: true) }
+    }
+
+    private func performLoginOperation(_ action: () async throws -> Void) async {
+        guard !loginActionsDisabled else {
+            setLoginMessage(LoginSwitchError.refreshRunning.localizedDescription, isError: true)
+            return
+        }
+        // Set before the first suspension: timer, wake, manual refresh and
+        // queued Analytics tasks cannot start while credentials are changing.
+        isManagingLogin = true
+        loginStatusMessage = nil
+        loginStatusIsError = false
+        defer { isManagingLogin = false }
+        do {
+            try loginSwitcher.requireClosed()
+            try await action()
+        } catch {
+            if let failure = error as? LoginSwitchError {
+                switch failure {
+                case .recoveryRequired, .credentialsChanged, .currentVerificationFailed: activeAccountID = nil
+                default: break
+                }
+            }
+            setLoginMessage(error.localizedDescription, isError: true)
+        }
+    }
+
+    private func setLoginMessage(_ message: String, isError: Bool = false) {
+        loginStatusMessage = message
+        loginStatusIsError = isError
     }
 
     func startAutomaticRefresh(interval: TimeInterval = 15 * 60) {
@@ -147,7 +244,7 @@ final class RunwayStore: ObservableObject {
     /// discovered by stable account ID and email, never by their plan tier.
     @discardableResult
     func refreshActiveAccount(forceProfile: Bool = false, presentFailure: Bool = true) async -> Bool {
-        guard !isRefreshing else { return false }
+        guard !isRefreshing, !isManagingLogin else { return false }
         isRefreshing = true
         refreshError = nil
         defer { isRefreshing = false }
@@ -219,7 +316,7 @@ final class RunwayStore: ObservableObject {
     }
 
     private func refreshAnalytics(accountID: UUID, externalAccountID: String, forceChats: Bool = false) async {
-        guard !isRefreshingAnalytics else { return }
+        guard !isRefreshingAnalytics, !isManagingLogin else { return }
         isRefreshingAnalytics = true
         analyticsRefreshError = nil
         defer { isRefreshingAnalytics = false }
@@ -261,7 +358,7 @@ final class RunwayStore: ObservableObject {
     }
 
     private func refreshProfileIfNeeded(accountID: UUID, force: Bool) async {
-        guard let account = accounts.first(where: { $0.id == accountID }),
+        guard !isManagingLogin, let account = accounts.first(where: { $0.id == accountID }),
               force || AccountProfile.needsRefresh(account.profile, now: now()) else { return }
         isRefreshingProfile = true
         profileRefreshError = nil

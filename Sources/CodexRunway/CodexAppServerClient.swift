@@ -1,4 +1,5 @@
 import Foundation
+import Darwin
 
 struct RateLimitsReadResponse: Decodable {
     let accountId: String?
@@ -72,6 +73,38 @@ actor CodexAppServerClient {
     private var buffer = Data()
     private var pending: [Int: CheckedContinuation<Data, Error>] = [:]
     private var nextID = 1
+
+    /// Local effective configuration only; no authentication or quota refresh.
+    func readLoginConfiguration(executablePath: String? = nil) async throws -> CodexLoginConfiguration {
+        let environment = ProcessInfo.processInfo.environment
+        guard ["OPENAI_API_KEY", "CODEX_ACCESS_TOKEN"].allSatisfy({ environment[$0]?.isEmpty != false }) else {
+            throw LoginSwitchError.unsupportedStorage
+        }
+        try start(executablePath: executablePath)
+        defer { stop() }
+        _ = try await request(method: "initialize", params: ["clientInfo": ["name": "codex-runway", "version": "0.1.0"]])
+        notify(method: "initialized")
+        let data = try await request(method: "config/read", params: ["includeLayers": false])
+        guard let root = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let config = root["config"] as? [String: Any],
+              let storage = config["cli_auth_credentials_store"] as? String else {
+            throw LoginSwitchError.unsupportedStorage
+        }
+        return CodexLoginConfiguration(storage: storage,
+            forcedLoginMethod: config["forced_login_method"] as? String,
+            forcedWorkspaceID: config["forced_chatgpt_workspace_id"] as? String)
+    }
+
+    /// Verifies just the selected login, allowing Codex to refresh its tokens.
+    /// Does not fetch quota, profile history, or other accounts.
+    func verifyLogin(executablePath: String? = nil) async throws -> AccountReadResponse {
+        try start(executablePath: executablePath)
+        defer { stop() }
+        _ = try await request(method: "initialize", params: ["clientInfo": ["name": "codex-runway", "version": "0.1.0"]])
+        notify(method: "initialized")
+        return try JSONDecoder().decode(AccountReadResponse.self,
+            from: await request(method: "account/read", params: ["refreshToken": true]))
+    }
 
     func readActiveProfile(executablePath: String? = nil) async throws -> ActiveAccountProfile {
         try start(executablePath: executablePath)
@@ -161,8 +194,9 @@ actor CodexAppServerClient {
             guard !data.isEmpty else { return }
             Task { await self?.receive(data) }
         }
-        process.terminationHandler = { [weak self] _ in
-            Task { await self?.failPending(with: CodexAppServerError.server("Codex App Server stopped unexpectedly.")) }
+        process.terminationHandler = { [weak self] child in
+            let pid = child.processIdentifier
+            Task { await self?.handleTermination(pid: pid) }
         }
 
         try process.run()
@@ -176,7 +210,15 @@ actor CodexAppServerClient {
         }
         pending.removeAll()
         process?.standardOutput.map { ($0 as? Pipe)?.fileHandleForReading.readabilityHandler = nil }
-        if process?.isRunning == true { process?.terminate() }
+        process?.terminationHandler = nil
+        if let process, process.isRunning {
+            process.terminate()
+            // Auth operations must not leave our own CLI holding cached tokens.
+            // Bound shutdown; only this child process may be force-stopped.
+            for _ in 0..<50 where process.isRunning { usleep(10_000) }
+            if process.isRunning { kill(process.processIdentifier, SIGKILL) }
+            process.waitUntilExit()
+        }
         process = nil
         stdin = nil
     }
@@ -235,6 +277,11 @@ actor CodexAppServerClient {
             return
         }
         continuation.resume(returning: data)
+    }
+
+    private func handleTermination(pid: Int32) {
+        guard process?.processIdentifier == pid else { return }
+        failPending(with: CodexAppServerError.server("Codex App Server stopped unexpectedly."))
     }
 
     private func failPending(with error: Error) {

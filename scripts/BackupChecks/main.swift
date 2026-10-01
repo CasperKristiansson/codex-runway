@@ -17,6 +17,9 @@ struct BackupChecks {
         try Data(#"{"day":"first"}"#.utf8).write(to: analytics.appendingPathComponent("\(accountID).json"))
         try Data(#"{"forecast":1}"#.utf8).write(to: forecasts.appendingPathComponent("forecast-123.json"))
         try Data("should never be copied".utf8).write(to: source.appendingPathComponent("auth.json"))
+        let savedLogins = source.appendingPathComponent("SavedLogins")
+        try manager.createDirectory(at: savedLogins, withIntermediateDirectories: true)
+        try Data("synthetic credential must never be copied".utf8).write(to: savedLogins.appendingPathComponent("secret.json"))
         let preferences = try PropertyListSerialization.data(
             fromPropertyList: ["codex-runway.accounts.v1": Data("accounts".utf8)], format: .xml, options: 0)
         let store = RunwayBackupStore(sourceDirectory: source, destination: destination)
@@ -50,6 +53,7 @@ struct BackupChecks {
         precondition(savedAnalytics == Data(#"{"day":"first"}"#.utf8))
         precondition(savedForecast == Data(#"{"forecast":1}"#.utf8))
         precondition(!manager.fileExists(atPath: extracted.appendingPathComponent("auth.json").path))
+        precondition(!manager.fileExists(atPath: extracted.appendingPathComponent("SavedLogins").path))
         let savedPreferences = try Data(contentsOf: extracted.appendingPathComponent("preferences.plist"))
         precondition(savedPreferences == preferences)
 
