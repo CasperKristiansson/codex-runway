@@ -2,6 +2,32 @@ export const known = value => typeof value === 'number' && Number.isFinite(value
 export const number = (value, decimals=0) => known(value) ? value.toLocaleString(undefined,{maximumFractionDigits:decimals}) : '—';
 export const stamp = value => known(value) ? new Date(value*1000).toLocaleString(undefined,{month:'short',day:'numeric',hour:'2-digit',minute:'2-digit'}) : 'Unknown';
 export const scale = (value, percent) => known(value) ? value*(percent?25:1) : null;
+// Give a visible reset priority over denser readings within 12 screen pixels.
+// The pixel-to-time scale comes from the actual responsive plot, not its range.
+export function chartHoverIndex(times, resetDates, time, secondsPerPixel, snapPixels=12) {
+ if(!times.length||!known(time))return -1;
+ const resets=new Set(resetDates);let nearest=0,reset=-1;
+ times.forEach((t,i)=>{
+  if(Math.abs(t-time)<Math.abs(times[nearest]-time))nearest=i;
+  if(resets.has(t)&&(reset<0||Math.abs(t-time)<Math.abs(times[reset]-time)))reset=i;
+ });
+ return reset>=0&&known(secondsPerPixel)&&secondsPerPixel>0&&Math.abs(times[reset]-time)<=secondsPerPixel*snapPixels?reset:nearest;
+}
+export const detailText = detail => [detail.heading,...detail.rows.map(r=>`${r.label}: ${r.value}`),detail.caption].filter(Boolean).join(' · ');
+export function activityDetails(day, values, type) {
+ const suffix=type==='usage'?'%':type==='messages'?' messages':' calls',entries=Object.entries(values);
+ const total=entries.every(([,v])=>known(v))?entries.reduce((s,[,v])=>s+v,0):null;
+ const format=v=>known(v)?`${number(v,type==='usage'?2:0)}${suffix}`:'—';
+ return {heading:day,rows:entries.map(([label,value])=>({label,value:format(value)})),caption:`Daily total: ${format(total)}${type==='usage'&&known(total)?' of limit':''}`};
+}
+export function operationNotice(data, now=Date.now()/1000) {
+ if(data?.status?.recoveryPending)return {source:'recovery',message:'A switch needs recovery. Open native Runway or use Recover Switch in Settings.'};
+ const running=(data?.operations||[]).filter(o=>o.state==='running').at(-1);
+ if(running)return {source:'operation',message:running.message+(data.status?.loginBusy&&data.status.loginMessage?` ${data.status.loginMessage}`:'')};
+ const last=data?.operations?.at(-1);
+ if(last&&['failed','interrupted'].includes(last.state)&&now-(last.finishedAt||last.startedAt)<90)return {source:'operation',message:last.message};
+ return null;
+}
 export function health(data, received, now, failed=false) {
  if(!data?.available)return {text:'Runway unavailable',stale:true};
  if(failed||now-received>20000)return {text:'Connection stale · last saved view retained',stale:true};

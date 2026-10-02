@@ -1,12 +1,14 @@
+import { showInspector, hideInspector } from './inspector.js';
+import { createDropdown, closeDropdown, dropdownIsOpen } from './dropdown.js';
 import { App } from '@modelcontextprotocol/ext-apps';
-import { known, number, stamp, scale, health, series, heatmap, chartBounds, label } from './presentation.js';
+import { known, number, stamp, scale, health, series, heatmap, chartBounds, label, activityDetails, detailText, operationNotice, chartHoverIndex } from './presentation.js';
 const uuid=()=>{if(crypto.randomUUID)return crypto.randomUUID();const b=crypto.getRandomValues(new Uint8Array(16));b[6]=(b[6]&15)|64;b[8]=(b[8]&63)|128;const h=[...b].map(v=>v.toString(16).padStart(2,'0')).join('');return `${h.slice(0,8)}-${h.slice(8,12)}-${h.slice(12,16)}-${h.slice(16,20)}-${h.slice(20)}`;};
 const $=id=>document.getElementById(id);
 const el=(tag,cls,text)=>{const node=document.createElement(tag);if(cls)node.className=cls;if(text!==undefined)node.textContent=text;return node;};
 const colors=['#625bca','#e89642','#46a18c','#bb70a9','#739dd1','#a3a5b8'];
 const button=(text,fn,disabled=false,cls='')=>{const b=el('button',cls,text);b.type='button';b.disabled=disabled;b.onclick=()=>Promise.resolve(fn()).catch(fail);return b;};
 const note=(text,cls='subtle')=>el('p',cls,text);
-const select=(name,options,value,fn)=>{const wrap=el('label','',name),s=el('select');s.setAttribute('aria-label',name);for(const [v,t] of options){const o=el('option','',t);o.value=v;s.append(o);}s.value=value;s.onchange=()=>Promise.resolve(fn(s.value)).catch(fail);wrap.append(s);return wrap;};
+const select=(name,options,value,fn,key)=>createDropdown(name,options,value,v=>Promise.resolve().then(()=>fn(v)).catch(fail),key);
 let native,data,tab='overview',accountID=null,received=0,failed=false,loading=false,pending=false,generation=0,mode='Daily';
 let previewPreferences={};const chartObservers=new Set();
 let usageDays=30,toolDays=7,messageDays=7,usageGroup='features',messageGroup='models',planWindow=10080,planDimension='thread_source',allChats=false,allPeriods=false;
@@ -34,7 +36,7 @@ function query(){return {section:tab,...(accountID?{accountID}:{}),days:365};}
 function healthUI(){const h=health(data,received,Date.now(),failed);$('connection').textContent=h.text;$('connection').classList.toggle('stale',h.stale);}
 function accept(value,scope){
  if(value?.version!==1)throw new Error('Unsupported Runway contract.');
- if(!value.available){failed=true;healthUI();notify(value.message||'Runway unavailable. Open the native app, then reload.','connection');if(!data)$('content').replaceChildren(note('Runway is unavailable. Open native Runway to display saved data.','empty'));return;}
+ if(!value.available){failed=true;healthUI();notify(value.message||'Runway unavailable. Open the native app, then reload.','connection');if(!data)$('view').replaceChildren(note('Runway is unavailable. Open native Runway to display saved data.','empty'));return;}
  data=value;received=Date.now();failed=false;
  if(data.preview)data.preferences={...data.preferences,...previewPreferences};
  if(noticeSource==='connection')clearNotice();
@@ -43,27 +45,25 @@ function accept(value,scope){
  if(accountID&&!value.accounts.some(a=>a.id===accountID)){accountID=null;generation++;notify('That account is no longer available. Showing all active accounts.');}
  $('error').hidden=true;healthUI();
  // Leave a dialog, select menu or retention input intact while polling.
- if(!$('confirm').open&&!document.activeElement?.matches('input,select'))render();
+ if(!$('confirm').open&&!dropdownIsOpen()&&!document.activeElement?.matches('input,.chart svg,.heatmap-cell')&&!document.querySelector('.chart svg:hover,.heatmap:hover'))render();
  renderOperations();
 }
 async function refresh(force=false){
  if(loading)return;loading=true;$('reload').disabled=true;const scope=query(),epoch=generation;
  try{const value=await api('runway_snapshot',scope);if(epoch===generation)accept(value,scope);}
  catch(e){failed=true;healthUI();fail(e);}finally{loading=false;$('reload').disabled=false;}
- if(force)render();
+ if(force&&!dropdownIsOpen())render();
 }
 async function command(action,args={},requestID=uuid()) {
  if(pending)throw new Error('Wait for the current request.');pending=true;
  const request={action,requestID,...args};uncertain=request;
- try{const result=await api('runway_command',request);if(result.error)throw new Error(result.error);uncertain=null;notify(result.operationID?`${result.message} Operation ${result.operationID.slice(0,8)}.`:result.message||'Native action requested.');}
+ try{const result=await api('runway_command',request);if(result.error)throw new Error(result.error);uncertain=null;if(result.state==='running')notify(result.message,'operation');else if(['failed','interrupted'].includes(result.state))fail(new Error(result.message));}
  catch(e){fail(new Error(`${e.message} Reload to check native operation status before retrying.`));}
  finally{pending=false;await refresh(true);}
 }
 function renderOperations(){
- const running=(data?.operations||[]).filter(o=>o.state==='running');const last=data?.operations?.at(-1);
- if(data?.status?.recoveryPending)notify('A switch needs recovery. Open native Runway or use Recover Switch in Settings.','recovery');
- else if(running.length)notify(running.at(-1).message+(data.status.loginBusy&&data.status.loginMessage?` ${data.status.loginMessage}`:''),'operation');
- else if(last&&Date.now()/1000-(last.finishedAt||last.startedAt)<90)notify(`${last.message} Operation ${last.id.slice(0,8)} · ${last.state}.`,'operation');
+ const status=operationNotice(data);
+ if(status)notify(status.message,status.source);
  else if(['operation','recovery'].includes(noticeSource)||(noticeSource==='action'&&Date.now()-noticeAt>90000))clearNotice();
 }
 async function confirm(title,message,yes='Continue'){
@@ -77,11 +77,11 @@ function tabs(){
   b.onkeydown=e=>{if(['ArrowRight','ArrowLeft','Home','End'].includes(e.key)){e.preventDefault();const index=e.key==='Home'?0:e.key==='End'?3:(i+(e.key==='ArrowRight'?1:3))%4;enter(['overview','settings','history','analytics'][index]);$('tabs').children[index].focus();}};return b;
  }));
 }
-function enter(name){if(tab===name)return;tab=name;accountID=null;generation++;$('content').scrollTop=0;tabs();render();refresh(true);}
+function enter(name){if(tab===name)return;closeDropdown();tab=name;accountID=null;generation++;$('content').scrollTop=0;tabs();render();refresh(true);}
 function heading(title,subtitle,controls=[]){const h=el('div','section-head'),text=el('div');text.append(el('h2','',title),note(subtitle));const actions=el('div','actions');actions.append(...controls);h.append(text,actions);return h;}
 function metrics(values){const grid=el('div','metrics');for(const [title,value,description] of values){const item=el('div','metric');item.append(el('strong','',value),el('span','',title));if(description)item.append(el('small','',description));grid.append(item);}return grid;}
 function panel(title){const p=el('section','panel');if(title)p.append(el('h3','',title));return p;}
-function accountFilter(){return select('Account',[['','All active accounts'],...data.accounts.map(a=>[a.id,`${a.name}${a.enabled?'':' · Inactive'}`])],accountID||'',value=>{accountID=value||null;generation++;render();refresh(true);});}
+function accountFilter(){return select('Account',[['','All active accounts'],...data.accounts.map(a=>[a.id,`${a.name}${a.enabled?'':' · Inactive'}`])],accountID||'',value=>{accountID=value&&data.accounts.some(a=>a.id===value)?value:null;if(value&&!accountID)notify('That account is no longer available. Showing all active accounts.');generation++;render();refresh(true);});}
 function activeName(){return accountID?data.accounts.find(a=>a.id===accountID)?.name||'Account':'All active accounts';}
 function table(headers,rows){const wrap=el('div','table-wrap'),t=el('table'),head=el('thead'),tr=el('tr');headers.forEach((h,i)=>tr.append(el('th',i?'number':'',h)));head.append(tr);const body=el('tbody');for(const values of rows){const row=el('tr');values.forEach((v,i)=>{const td=el('td',i?'number':'');if(v instanceof Node)td.append(v);else td.textContent=v;row.append(td);});body.append(row);}t.append(head,body);wrap.append(t);return wrap;}
 // A responsive SVG with a single keyboard focus target. Arrow/Home/End keys
@@ -89,11 +89,11 @@ function table(headers,rows){const wrap=el('div','table-wrap'),t=el('table'),hea
 function chart({lines,start,end,bounds,details,events=[],title,stacked=false}) {
  const wrap=el('div','chart'),svg=document.createElementNS('http://www.w3.org/2000/svg','svg');svg.setAttribute('preserveAspectRatio','none');svg.tabIndex=0;svg.setAttribute('role','group');svg.setAttribute('aria-label',`${title}. Use left and right arrow keys to inspect saved values.`);
  const detail=el('output','chart-details','Hover the graph or focus it and use arrow keys for details.');
- const points=lines.flatMap(l=>l.points).filter(p=>known(p.x)&&known(p.y));const times=[...new Set([...points.map(p=>p.x),...events.map(e=>e.date)].filter(t=>t>=start&&t<=end))].sort((a,b)=>a-b);
+ const points=lines.flatMap(l=>l.points).filter(p=>known(p.x)&&known(p.y));const times=[...new Set([...points.map(p=>p.x),...events.map(e=>e.date)].filter(t=>t>=start&&t<=end))].sort((a,b)=>a-b);const resetDates=events.filter(e=>known(e.date)&&e.date>=start&&e.date<=end).map(e=>e.date),resetTimes=new Set(resetDates);let hovering=false,pointerY=null;
  function draw(width){
  svg.replaceChildren();svg.setAttribute('viewBox',`0 0 ${width} 240`);const plotWidth=width-63;
  const [low,high]=bounds||chartBounds(points.map(p=>p.y));const x=t=>48+(t-start)/Math.max(1,end-start)*plotWidth,y=v=>210-(v-low)/Math.max(.01,high-low)*190;
- function shape(tag,attrs,text){const node=document.createElementNS(svg.namespaceURI,tag);Object.entries(attrs).forEach(([k,v])=>node.setAttribute(k,v));if(text!==undefined)node.textContent=text;svg.append(node);return node;}
+ function shape(tag,attrs,text,parent=svg){const node=document.createElementNS(svg.namespaceURI,tag);Object.entries(attrs).forEach(([k,v])=>node.setAttribute(k,v));if(text!==undefined)node.textContent=text;parent.append(node);return node;}
  for(let i=0;i<4;i++){const v=low+(high-low)*i/3;shape('line',{x1:48,y1:y(v),x2:width-15,y2:y(v),stroke:'#eeeef5'});shape('text',{x:40,y:y(v)+3,'text-anchor':'end'},number(v,1));}
  for(let i=0;i<4;i++){const t=start+(end-start)*i/3;shape('text',{x:x(t),y:234,'text-anchor':i===0?'start':i===3?'end':'middle'},stamp(t).split(',').slice(0,1).join(','));}
  const clipID=`clip-${uuid()}`;const defs=document.createElementNS(svg.namespaceURI,'defs'),clip=document.createElementNS(svg.namespaceURI,'clipPath'),rect=document.createElementNS(svg.namespaceURI,'rect');clip.id=clipID;Object.entries({x:48,y:10,width:plotWidth,height:200}).forEach(([k,v])=>rect.setAttribute(k,v));clip.append(rect);defs.append(clip);svg.append(defs);
@@ -107,12 +107,22 @@ function chart({lines,start,end,bounds,details,events=[],title,stacked=false}) {
   shape('path',{d:path,fill:'none',stroke:line.color||colors[index%colors.length],'stroke-width':1.9,'stroke-dasharray':line.dashed?'5 4':'','clip-path':`url(#${clipID})`,'vector-effect':'non-scaling-stroke'});
   if(!line.dashed&&line.points.length<=90)for(const p of line.points.filter(p=>known(p.y)))shape('circle',{cx:x(p.x),cy:y(p.y),r:2.5,fill:line.color||colors[index%colors.length],'clip-path':`url(#${clipID})`});
  }
- for(const event of events.filter(e=>e.date>=start&&e.date<=end))shape('line',{x1:x(event.date),x2:x(event.date),y1:10,y2:210,stroke:'#65a597','stroke-dasharray':event.kind==='observed'?'':'3 4','stroke-width':1});
- const cursor=shape('line',{x1:48,x2:48,y1:10,y2:210,stroke:'#a2a0bd',visibility:'hidden'});let index=chartPositions.has(title)?Math.max(0,times.findIndex(t=>t>=chartPositions.get(title))):0;
- function inspect(i){if(!times.length)return;index=Math.max(0,Math.min(times.length-1,i));const t=times[index];chartPositions.set(title,t);cursor.setAttribute('x1',x(t));cursor.setAttribute('x2',x(t));cursor.setAttribute('visibility','visible');detail.textContent=details(t);}
- svg.onpointermove=e=>{const r=svg.getBoundingClientRect(),t=start+(((e.clientX-r.left)/r.width*width-48)/plotWidth)*(end-start);let nearest=0;times.forEach((p,i)=>{if(Math.abs(p-t)<Math.abs(times[nearest]-t))nearest=i;});inspect(nearest);};
- svg.onfocus=()=>inspect(index);svg.onkeydown=e=>{if(['ArrowLeft','ArrowRight','Home','End'].includes(e.key)){e.preventDefault();inspect(e.key==='Home'?0:e.key==='End'?times.length-1:index+(e.key==='ArrowRight'?1:-1));}};
- if(chartPositions.has(title))inspect(index);
+ for(const event of events.filter(e=>e.date>=start&&e.date<=end))shape('line',{x1:x(event.date),x2:x(event.date),y1:10,y2:210,stroke:'#65a597','data-reset-date':event.date,'stroke-dasharray':event.kind==='observed'?'':'3 4','stroke-width':1});
+ const cursor=shape('line',{x1:48,x2:48,y1:10,y2:210,stroke:'#aaa7c9','stroke-dasharray':'3 3',visibility:'hidden'}),markers=shape('g',{'clip-path':`url(#${clipID})`,'data-chart-selection':''});let index=chartPositions.has(title)?Math.max(0,times.findIndex(t=>t>=chartPositions.get(title))):0;
+ function inspect(i,show=true){
+  if(!times.length)return;index=Math.max(0,Math.min(times.length-1,i));const t=times[index],content=details(t);chartPositions.set(title,t);detail.textContent=detailText(content);markers.replaceChildren();
+  cursor.setAttribute('stroke',resetTimes.has(t)?'#408e7c':'#aaa7c9');cursor.setAttribute('stroke-width',resetTimes.has(t)?1.8:1);cursor.setAttribute('x1',x(t));cursor.setAttribute('x2',x(t));cursor.setAttribute('visibility',show?'visible':'hidden');
+  if(!show)return;
+  if(stacked){const bw=Math.max(5,Math.min(24,plotWidth/Math.max(1,(end-start)/86400)*.65+4));shape('rect',{x:x(t)-bw/2,y:10,width:bw,height:200,fill:'#5752cb','fill-opacity':'.09'},undefined,markers);}
+  let total=0;for(const [i,line] of lines.entries())for(const p of line.points.filter(p=>p.x===t&&known(p.y))){total+=p.y;shape('circle',{cx:x(t),cy:y(stacked?total:p.y),r:4,fill:'white',stroke:line.color||colors[i%colors.length],'stroke-width':2},undefined,markers);}
+  const rect=svg.getBoundingClientRect();showInspector(wrap,content,{x:rect.left+x(t)/width*rect.width,y:pointerY??rect.top+rect.height/2});
+ }
+ function dismiss(){cursor.setAttribute('visibility','hidden');markers.replaceChildren();hideInspector(wrap);}
+ svg.onpointermove=e=>{hovering=true;pointerY=e.clientY;const r=svg.getBoundingClientRect(),t=start+(((e.clientX-r.left)/r.width*width-48)/plotWidth)*(end-start);const nearest=chartHoverIndex(times,resetDates,t,(end-start)/plotWidth*width/r.width);if(nearest>=0)inspect(nearest);};
+ svg.onpointerleave=()=>{hovering=false;pointerY=null;if(document.activeElement!==svg)dismiss();};
+ svg.onfocus=()=>{pointerY=null;requestAnimationFrame(()=>{if(document.activeElement===svg)inspect(index);});};svg.onblur=()=>{if(!hovering)dismiss();};
+ svg.onkeydown=e=>{if(e.key==='Escape'){e.preventDefault();dismiss();}else if(['ArrowLeft','ArrowRight','Home','End'].includes(e.key)){e.preventDefault();inspect(e.key==='Home'?0:e.key==='End'?times.length-1:index+(e.key==='ArrowRight'?1:-1));}};
+ if(chartPositions.has(title))inspect(index,hovering||document.activeElement===svg);
  }
  draw(640);const observer=new ResizeObserver(entries=>{const width=entries[0].contentRect.width;if(width>0)draw(Math.max(220,width));});observer.observe(svg);chartObservers.add(observer);
  wrap.append(svg,detail);return wrap;
@@ -128,7 +138,7 @@ function overview(){
  ]));root.append(summary);
  const capacity=panel(),head=el('div','panel-head');head.append(el('h3','','Capacity over time'),segmented('Capacity view',[['graph','Graph'],['table','Table']],p.mode,v=>displayPreference({mode:v}),native&&mutationsDisabled()));capacity.append(head);
  const controls=el('div','toolbar chart-toolbar');controls.append(select('Time range',[['overview','Forecast'],['hour','Past hour'],['sixHours','Past 6 hours'],['day','Past day'],['threeDays','Past 3 days'],['week','Past week']],p.range,v=>displayPreference({range:v})));
- controls.append(segmented('Capacity scale',[['percent','%'],['units','Units']],p.percent?'percent':'units',v=>displayPreference({percent:v==='percent'}),native&&mutationsDisabled()));for(const c of controls.querySelectorAll('select')){c.disabled=mutationsDisabled();if(!native)c.title='Choose a time range in the Codex sidebar or native Runway.';}capacity.append(controls);
+ controls.append(segmented('Capacity scale',[['percent','%'],['units','Units']],p.percent?'percent':'units',v=>displayPreference({percent:v==='percent'}),native&&mutationsDisabled()));for(const c of controls.querySelectorAll('.dropdown-trigger')){c.disabled=mutationsDisabled();if(!native)c.title='Choose a time range in the Codex sidebar or native Runway.';}capacity.append(controls);
  if(report.historyTruncated)capacity.append(note('Showing the latest 2,500 readings. Table totals use the complete saved history.'));
  if(report.issue)capacity.append(note(report.issue,'warn'));
  if(known(report.shortfallUnits))capacity.append(note(`Projected deficit ${unit(report.shortfallUnits)} at ${stamp(report.shortfallAt)}.`,'warn'));
@@ -137,7 +147,7 @@ function overview(){
   if(report.history.length||report.prediction.length){
    const all=[...report.history,...report.prediction];capacity.append(chart({title:'Combined allowance',start:report.start,end:report.end,bounds:chartBounds(all.filter(v=>v.date>=report.start).map(v=>scale(v.units,p.percent)),p.range==='overview'?scale(report.total,p.percent):null),events:report.resets,
     lines:[{points:report.history.map(v=>({x:v.date,y:scale(v.units,p.percent),segment:v.segment})),gaps:false},{points:report.prediction.map(v=>({x:v.date,y:scale(v.units,p.percent)})),dashed:true,color:colors[0]}],
-    details:t=>{const matches=all.filter(v=>v.date===t);const resets=report.resets.filter(r=>r.date===t);return `${stamp(t)} · ${matches.map(v=>`${unit(v.units)} ${report.prediction.includes(v)?'predicted':'saved / interpolated'}`).join(' · ')}${resets.length?' · '+resets.map(r=>`${r.account}: ${r.kind} reset${known(r.after)?` → ${unit(r.after)}`:''}`).join(' · '):''}`;}}));
+    details:t=>({heading:stamp(t),rows:[...all.filter(v=>v.date===t).map(v=>({label:report.prediction.includes(v)?'Predicted':'Saved / interpolated',value:unit(v.units),color:colors[0]})),...report.resets.filter(r=>r.date===t).map(r=>({label:r.account,value:`${r.kind} reset${known(r.after)?` → ${unit(r.after)}`:''}`,color:'#65a597'}))]})}));
    const legend=el('div','legend');['Saved / interpolated','Predicted · dashed','Resets'].forEach((text,i)=>{const n=el('span','',text);n.style.setProperty('--color',i===2?'#65a597':colors[0]);legend.append(n);});capacity.append(legend);
   }else capacity.append(note('No saved capacity readings for this range.','empty'));
  }else capacity.append(table(['Interval','Used','Balance'],report.intervals.map(r=>{const name=el('div','',`${stamp(r.start)} – ${stamp(r.end)}`);if(r.resets.length)name.append(el('small','',r.resets.map(v=>`${v.account}: ${v.kind} reset`).join(' · ')));return [name,unit(r.used),unit(r.balance)];})));
@@ -185,25 +195,28 @@ function history(){
  const weeks=heatmap(h.days,mode,data.generatedAt*1000),calendar=el('div','calendar'),grid=el('div','heatmap'),months=el('div','heatmap-months');
  for(const n of [grid,months])n.style.setProperty('--weeks',weeks.length);grid.role='group';grid.setAttribute('aria-label',`${mode} token activity. Arrow keys navigate; Home and End select the first and last cells.`);
  const details=el('output','heatmap-detail',mode==='Daily'?'Each cell is one day. Hover or use arrow keys to inspect activity.':mode==='Weekly'?'Each column is one week. Bar height shows its total tokens.':'Each column shows the running token total, filled from the bottom.');
- const tooltip=el('div','heatmap-tooltip');tooltip.hidden=true;tooltip.setAttribute('aria-hidden','true');const cells=[],days=weeks.flat(),entry=days.findLastIndex(d=>!d.hidden&&d.value>0);
+ const cells=[],days=weeks.flat(),entry=days.findLastIndex(d=>!d.hidden&&d.value>0);
  days.forEach((d,index)=>{
   const b=button('',()=>{},false);b.tabIndex=index===Math.max(0,entry)?0:-1;b.className=`heatmap-cell level-${d.level}`;if(d.hidden){b.style.visibility='hidden';b.setAttribute('aria-hidden','true');}
   const dateLabel=mode==='Daily'?d.date:`Week of ${d.week}`,text=`${dateLabel} · ${number(d.value)} tokens${mode==='Cumulative'?' · Cumulative total':''}`;b.setAttribute('aria-label',text);
-  function inspect(){details.textContent=text;tooltip.replaceChildren(el('span','',dateLabel),el('strong','',`${d.value.toLocaleString(undefined,{notation:'compact',maximumFractionDigits:1})} tokens`));if(mode==='Cumulative')tooltip.append(el('small','','Cumulative total'));tooltip.hidden=false;tooltip.style.left=`${Math.max(0,Math.min(grid.clientWidth-190,b.offsetLeft+b.offsetWidth/2-95))}px`;tooltip.style.top=`${b.offsetTop-tooltip.offsetHeight-10}px`;}
-  b.onpointerenter=b.onfocus=inspect;b.onblur=()=>tooltip.hidden=true;b.onkeydown=e=>{const offsets={ArrowLeft:-7,ArrowRight:7,ArrowUp:-1,ArrowDown:1};if(e.key in offsets||['Home','End'].includes(e.key)){e.preventDefault();const next=e.key==='Home'?0:e.key==='End'?days.findLastIndex(c=>!c.hidden):Math.max(0,Math.min(cells.length-1,index+offsets[e.key]));if(!days[next].hidden){cells.forEach(c=>c.tabIndex=-1);cells[next].tabIndex=0;cells[next].focus();}}};cells.push(b);grid.append(b);
- });grid.onpointerleave=()=>tooltip.hidden=true;
+  function inspect(){
+   details.textContent=text;cells.forEach((c,i)=>c.classList.toggle('is-inspected',mode==='Daily'?i===index:Math.floor(i/7)===Math.floor(index/7)));const rect=b.getBoundingClientRect();
+   showInspector(grid,{heading:dateLabel,rows:[{label:mode==='Daily'?'Tokens':mode==='Weekly'?'Weekly tokens':'Cumulative tokens',value:number(d.value),color:'#2e66c9'}]},{x:rect.left+rect.width/2,y:rect.top+rect.height/2},'heatmap');
+  }
+  b.onpointerenter=inspect;b.onfocus=()=>requestAnimationFrame(()=>{if(document.activeElement===b)inspect();});b.onblur=()=>{if(!grid.matches(':hover')){hideInspector(grid);cells.forEach(c=>c.classList.remove('is-inspected'));}};b.onkeydown=e=>{if(e.key==='Escape'){e.preventDefault();hideInspector(grid);cells.forEach(c=>c.classList.remove('is-inspected'));return;}const offsets={ArrowLeft:-7,ArrowRight:7,ArrowUp:-1,ArrowDown:1};if(e.key in offsets||['Home','End'].includes(e.key)){e.preventDefault();const next=e.key==='Home'?0:e.key==='End'?days.findLastIndex(c=>!c.hidden):Math.max(0,Math.min(cells.length-1,index+offsets[e.key]));if(!days[next].hidden){cells.forEach(c=>c.tabIndex=-1);cells[next].tabIndex=0;cells[next].focus();}}};cells.push(b);grid.append(b);
+ });grid.onpointerleave=()=>{if(!grid.contains(document.activeElement)){hideInspector(grid);cells.forEach(c=>c.classList.remove('is-inspected'));}};
  let prior='';weeks.forEach((week,i)=>{const month=week[0].date.slice(0,7);if(month!==prior&&i>0&&i<weeks.length-2){const m=el('span','',new Date(week[0].date+'T12:00:00Z').toLocaleString(undefined,{month:'short',timeZone:'UTC'}));m.style.gridColumn=String(i+1);m.dataset.month=week[0].date.slice(5,7);months.append(m);}prior=month;});
- calendar.append(grid,months,tooltip);activity.append(calendar);
+ calendar.append(grid,months);activity.append(calendar);
  const legend=el('div','heatmap-legend');legend.append(el('span','','Less'));for(let level=0;level<5;level++)legend.append(el('i',`level-${level}`));legend.append(el('span','','More'));
  const calendarFooter=el('div','calendar-footer');calendarFooter.append(details,legend);activity.append(calendarFooter);profile.append(activity,note(`Saved ${stamp(h.fetchedAt)} · Activity can lag by about six hours`,'data-caption'));
  if(h.savedCount<h.accountCount)profile.append(note('Some accounts have no saved profile. Their activity is unavailable.','warn'));root.append(profile);return root;
 }
 function activityPanel(title,type,group,days,changeDays,changeGroup,showPeriod=true){
- const a=datasets.get(`analytics:${accountID||''}`),p=panel(),controls=el('div','toolbar');if(showPeriod)controls.append(segmented(`${title} period`,[['7','7d'],['30','30d'],['365','1y']],String(days),v=>{changeDays(Number(v));render();}));if(changeGroup)controls.append(select('Group by',type==='usage'?[['features','Feature'],['models','Model'],['surfaces','Surface']]:[['models','Model'],['surfaces','Surface']],group,v=>{changeGroup(v);render();}));const head=el('div','panel-head');head.append(el('h3','',title),controls);p.append(head);
+ const a=datasets.get(`analytics:${accountID||''}`),p=panel(),controls=el('div','toolbar');if(showPeriod)controls.append(segmented(`${title} period`,[['7','7d'],['30','30d'],['365','1y']],String(days),v=>{changeDays(Number(v));render();}));if(changeGroup)controls.append(select('Group by',type==='usage'?[['features','Feature'],['models','Model'],['surfaces','Surface']]:[['models','Model'],['surfaces','Surface']],group,v=>{changeGroup(v);render();},`${type} grouping`));const head=el('div','panel-head');head.append(el('h3','',title),controls);p.append(head);
  const s=series(a.accounts,type,group,days,data.generatedAt*1000);if(!s.rows.length||!s.names.length){p.append(note('No activity readings saved for this period.','empty'));return p;}
  p.append(note(`${number(s.total,type==='usage'?1:0)} ${type==='usage'?'% of limit':type==='messages'?'messages':'calls'} across saved readings`,'activity-total'));
  const start=data.generatedAt-(days-1)*86400-43200,end=data.generatedAt+43200;
- p.append(chart({title,start,end,stacked:type==='usage',bounds:[0,Math.max(1,...s.rows.map(r=>type==='usage'?Object.values(r.values).reduce((s,v)=>s+v,0):Math.max(...Object.values(r.values))))],lines:s.names.map((name,index)=>({color:colors[index],gaps:true,points:s.rows.map(r=>({x:Date.parse(`${r.day}T12:00:00Z`)/1000,y:r.values[name]}))})),details:t=>{const day=new Date(t*1000).toISOString().slice(0,10),row=s.rows.find(r=>r.day===day);return row?`${day} · ${Object.entries(row.values).map(([n,v])=>`${n}: ${number(v,type==='usage'?2:0)}`).join(' · ')} · Daily total: ${number(Object.values(row.values).reduce((sum,v)=>sum+v,0),2)}`:`${day} · No saved reading`;}}));
+ p.append(chart({title,start,end,stacked:type==='usage',bounds:[0,Math.max(1,...s.rows.map(r=>type==='usage'?Object.values(r.values).reduce((s,v)=>s+v,0):Math.max(...Object.values(r.values))))],lines:s.names.map((name,index)=>({color:colors[index],gaps:true,points:s.rows.map(r=>({x:Date.parse(`${r.day}T12:00:00Z`)/1000,y:r.values[name]}))})),details:t=>{const day=new Date(t*1000).toISOString().slice(0,10),row=s.rows.find(r=>r.day===day);if(!row)return {heading:day,rows:[],caption:'No saved reading'};const content=activityDetails(day,row.values,type);content.rows.forEach((r,i)=>r.color=colors[i%colors.length]);return content;}}));
  const legend=el('div','legend');s.names.forEach((name,index)=>{const n=el('span','',name);n.style.setProperty('--color',colors[index]);legend.append(n);});p.append(legend);
  if(type==='usage'){const total=Object.values(s.totals).reduce((s,v)=>s+v,0);p.append(table(['Category','Share of saved usage'],Object.entries(s.totals).sort((a,b)=>b[1]-a[1]).slice(0,6).map(([name,v])=>[name,`${number(v/total*100,1)}%`])));}return p;
 }
@@ -215,31 +228,32 @@ function analytics(){
  const coverage=el('details','data-coverage');coverage.append(el('summary','',`Saved data · ${a.savedCount} of ${a.accountCount} accounts`),note('Charts use saved readings. Missing accounts and gaps are unavailable, rather than zero.'));if(!accountID)coverage.append(note('Combined usage is weighted by each saved account’s plan capacity.'));for(const source of a.sources||a.accounts)coverage.append(note(`${source.name} · Saved ${stamp(source.fetchedAt)}${source.freshness?` · ${source.freshness}`:''}`));root.append(coverage);
  root.append(activityPanel('Usage history','usage',usageGroup,usageDays,v=>usageDays=v,v=>usageGroup=v));
  const chats=panel('Top chats'),all=a.accounts.flatMap(v=>v.chats.filter(c=>known(c.weeklyPercent)).map(c=>({...c,account:c.account||v.name}))).sort((a,b)=>b.weeklyPercent-a.weeklyPercent);chats.append(note('Each task’s saved plan and credit usage.'));if(all.length)chats.append(table(['Chat','% weekly limit','Credits used'],all.slice(0,allChats?100:5).map(c=>{const name=el('div','',c.title);name.append(el('small','',`${c.account} · ${c.status}`));if(known(c.fiveHourPercent))name.append(el('small','',`5-hour limit: ${number(c.fiveHourPercent,1)}%`));return [name,`${number(c.weeklyPercent,1)}%`,c.credits==null?'—':/^[+-]?0(?:\.0*)?(?:e[+-]?\d+)?$/i.test(c.credits)?'0':c.credits];})));else chats.append(note('No task-level usage saved yet.','empty'));if(all.length>5)chats.append(button(allChats?'Show less':'Show more',()=>{allChats=!allChats;render();}));
- const plans=panel('Plan-limit periods'),toolbar=el('div','toolbar');toolbar.append(select('Window',[['10080','Weekly'],['300','5 hours']],String(planWindow),v=>{planWindow=Number(v);render();}),select('Group by',[['thread_source','Feature'],['model','Model'],['surface','Surface']],planDimension,v=>{planDimension=v;render();}));plans.append(toolbar);
+ const plans=panel('Plan-limit periods'),toolbar=el('div','toolbar');toolbar.append(select('Window',[['10080','Weekly'],['300','5 hours']],String(planWindow),v=>{planWindow=Number(v);render();}),select('Group by',[['thread_source','Feature'],['model','Model'],['surface','Surface']],planDimension,v=>{planDimension=v;render();},'plan grouping'));plans.append(toolbar);
  const periods=a.accounts.flatMap(v=>v.periods.filter(p=>p.windowMinutes===planWindow).map(p=>({...p,account:p.account||v.name}))).sort((a,b)=>b.end.localeCompare(a.end));if(!periods.length)plans.append(note('No plan-limit periods saved yet.','empty'));
  for(const period of periods.slice(0,allPeriods?100:5)){const d=el('details'),summary=el('summary','',`${period.start.slice(0,10)} — ${period.end.slice(0,10)} · ${period.account} · ${known(period.usedPercent)?number(period.usedPercent,1)+'%':'Unknown'}${period.complete?'':' · Accounting incomplete'}`);d.append(summary,note(`${stamp(Date.parse(period.start)/1000)} — ${stamp(Date.parse(period.end)/1000)}`));const rows=period.breakdowns.find(b=>b.dimension===planDimension)?.rows||[];if(rows.length)d.append(table(['Category','% limit'],rows.map(v=>[label(v.name),`${number(v.value,1)}%`])));else d.append(note('No breakdown saved for this period.'));plans.append(d);}if(periods.length>5)plans.append(button(allPeriods?'Show less':`Show all ${Math.min(100,periods.length)} periods`,()=>{allPeriods=!allPeriods;render();},false,'text-button'));const detailGrid=el('div','analytics-grid');detailGrid.classList.toggle('expanded-details',allChats||allPeriods);detailGrid.append(chats,plans);root.append(detailGrid);
  const toolHeader=el('div','panel-head');toolHeader.append(el('h3','','Tool activity'),segmented('Tool activity period',[['7','7d'],['30','30d'],['365','1y']],String(toolDays),v=>{toolDays=Number(v);render();}));const tools=el('div','analytics-grid');tools.append(activityPanel('Plugins called','plugins','items',toolDays,v=>toolDays=v,null,false),activityPanel('Skills used','skills','items',toolDays,v=>toolDays=v,null,false));root.append(toolHeader,tools,activityPanel('Messages','messages',messageGroup,messageDays,v=>messageDays=v,v=>messageGroup=v));return root;
 }
 function render(){
+ closeDropdown();hideInspector();
  for(const observer of chartObservers)observer.disconnect();chartObservers.clear();
  tabs();$('content').setAttribute('aria-labelledby',`tab-${tab}`);$('content').setAttribute('aria-label',tab[0].toUpperCase()+tab.slice(1));
  if(!data?.available)return;
  const scrollTop=$('content').scrollTop;
- const focused=document.activeElement;const wasInside=focused?.closest?.('main');const focusText=focused?.textContent;const focusLabel=focused?.getAttribute('aria-label');
- $('content').replaceChildren(({overview,settings,history,analytics})[tab]());
+ const focused=document.activeElement;const wasInside=focused?.closest?.('main');const focusText=focused?.textContent;const focusLabel=focused?.getAttribute('aria-label');const focusKey=focused?.dataset?.focusKey;
+ $('view').replaceChildren(({overview,settings,history,analytics})[tab]());
  if(focused&&focused!==document.body&&focused.id!=='content'&&wasInside){
-  const candidate=[...$('content').querySelectorAll('button,select,input,svg')].find(n=>focusLabel?n.getAttribute('aria-label')===focusLabel:n.textContent===focusText);candidate?.focus();
+  const candidate=[...$('content').querySelectorAll('button,select,input,svg')].find(n=>focusKey?n.dataset.focusKey===focusKey:focusLabel?n.getAttribute('aria-label')===focusLabel:n.textContent===focusText);candidate?.focus({preventScroll:true});
  }
  $('content').scrollTop=scrollTop;
- for(const name of ['usageError','profileError','analyticsError'])if(data.status[name]&&((tab==='overview'&&name==='usageError')||(tab==='history'&&name==='profileError')||(tab==='analytics'&&name==='analyticsError')))$('content').prepend(note(data.status[name],'error'));
- if(data.accountsTruncated)$('content').prepend(note(`Showing the first 128 of ${data.accountCount} accounts. Use native Runway for the complete account list.`, 'warn'));
+ for(const name of ['usageError','profileError','analyticsError'])if(data.status[name]&&((tab==='overview'&&name==='usageError')||(tab==='history'&&name==='profileError')||(tab==='analytics'&&name==='analyticsError')))$('view').prepend(note(data.status[name],'error'));
+ if(data.accountsTruncated)$('view').prepend(note(`Showing the first 128 of ${data.accountCount} accounts. Use native Runway for the complete account list.`, 'warn'));
 
 }
 $('reload').onclick=()=>refresh(true);$('open-native').onclick=()=>command('openNative');
 async function start(){
  if(window.parent!==window||new URLSearchParams(location.search).get('layout')==='embedded')document.body.classList.add('embedded');
  tabs();
- if(window.parent!==window){native=new App({name:'Codex Runway',version:'1.0.0'},{},{autoResize:true});native.ontoolresult=result=>{if(!data&&result.structuredContent?.available!==undefined)accept(result.structuredContent,{section:'overview'});};try{await native.connect();}catch(e){failed=true;healthUI();fail(e);$('content').replaceChildren(note('The embedded host connection is unavailable. Open native Codex Runway from Applications.', 'empty'));$('open-native').disabled=true;return;}}
+ if(window.parent!==window){native=new App({name:'Codex Runway',version:'1.0.0'},{},{autoResize:true});native.ontoolresult=result=>{if(!data&&result.structuredContent?.available!==undefined)accept(result.structuredContent,{section:'overview'});};try{await native.connect();}catch(e){failed=true;healthUI();fail(e);$('view').replaceChildren(note('The embedded host connection is unavailable. Open native Codex Runway from Applications.', 'empty'));$('open-native').disabled=true;return;}}
  else $('open-native').disabled=true;
  await refresh();setInterval(()=>{if(!document.hidden&&!$('confirm').open)refresh();},5000);setInterval(healthUI,1000);document.addEventListener('visibilitychange',()=>{if(!document.hidden)refresh();});
 }let resizeTimer;window.addEventListener('resize',()=>{clearTimeout(resizeTimer);resizeTimer=setTimeout(()=>{if(!$('confirm').open)render();},150);});start();
