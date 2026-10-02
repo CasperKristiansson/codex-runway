@@ -33,6 +33,7 @@ final class RunwayStore: ObservableObject {
     private let readSavedUsage: @MainActor (String, CodexLoginConfiguration) async throws -> ActiveCodexAccount
     private let verifyLogin: @MainActor () async throws -> AccountReadResponse
 
+    let displayPreferences: RunwayDisplayPreferences
     private let defaultsKey = "codex-runway.accounts.v1"
     var dashboardAccounts: [CodexAccount] { accounts.filter(\.isEnabled) }
     private var refreshTimer: Timer?
@@ -72,6 +73,7 @@ final class RunwayStore: ObservableObject {
         try await CodexAppServerClient().readActiveAccount()
     }) {
         self.defaults = defaults
+        self.displayPreferences = RunwayDisplayPreferences(defaults: defaults)
         self.loginSwitcher = loginSwitcher
         self.readLoginConfiguration = readLoginConfiguration
         self.verifyLogin = verifyLogin

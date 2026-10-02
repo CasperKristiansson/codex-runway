@@ -1,0 +1,10 @@
+<!doctype html><html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Codex Runway</title><style>/* STYLE */</style></head><body>
+<div id="app">
+<header class="masthead"><div class="brand"><span class="mark" aria-hidden="true">R</span><div><h1>Codex Runway</h1><p id="connection" role="status">Connecting to native Runway…</p></div></div><div class="actions"><button id="open-native">Open native app</button><button id="reload" title="Read saved native state; does not fetch from OpenAI">Reload view</button></div></header>
+<nav id="tabs" role="tablist" aria-label="Runway sections"></nav>
+<div id="error" role="alert" hidden></div><div id="notice" role="status" hidden></div>
+<main id="content" role="tabpanel" tabindex="0" aria-label="Overview"><p class="empty">Loading saved Runway data…</p></main>
+<footer>Native Runway refreshes usage. Saved logins stay in device-local Keychain.</footer>
+</div>
+<dialog id="confirm"><form method="dialog"><h2 id="confirm-title"></h2><p id="confirm-message"></p><div class="actions"><button value="cancel">Cancel</button><button id="confirm-yes" value="yes" class="primary">Continue</button></div></form></dialog>
+<script>/* BUNDLE */</script></body></html>

@@ -127,7 +127,8 @@ final class StatusPanelController: NSObject, NSWindowDelegate {
         hidePanel()
     }
 
-    private func showSettings() {
+    func showSettings() {
+        settingsNavigation.tab = 3
         settingsNavigation.resetAccountFilter()
         hidePanel()
         if settingsWindow == nil {

@@ -6,6 +6,8 @@ import SwiftUI
 final class CodexRunwayApp: NSObject, NSApplicationDelegate {
     private let store = RunwayStore()
     private let backupManager = RunwayBackupManager()
+    private var hubController: RunwayHubController?
+    private var hubSocket: RunwayHubSocket?
     private var menuController: StatusPanelController?
 
     static func main() {
@@ -17,13 +19,23 @@ final class CodexRunwayApp: NSObject, NSApplicationDelegate {
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        // Acquire the native writer lease before initializing hub receipts or
+        // starting timers. A second copy of this app must not become a writer.
+        do { hubSocket = try RunwayHubSocket { [weak self] data in await self?.hubReply(data) ?? Data() } }
+        catch HubError.busy { NSApp.terminate(nil); return }
+        catch { NSLog("Codex Runway: local hub bridge unavailable.") }
         menuController = StatusPanelController(store: store, backupManager: backupManager)
         store.reloadSavedLogins()
+        hubController = RunwayHubController(store: store, backups: backupManager, openNative: { [weak self] in self?.menuController?.showSettings() })
+        hubSocket?.start()
         store.startAutomaticRefresh()
         backupManager.start()
     }
 
+    private func hubReply(_ data: Data) -> Data { hubController?.reply(data) ?? Data() }
+
     func applicationWillTerminate(_ notification: Notification) {
+        hubSocket?.stop()
         store.stopAutomaticRefresh()
         backupManager.stop()
     }
@@ -187,7 +199,7 @@ private struct FooterButtonStyle: ButtonStyle {
     }
 }
 
-private struct AccountCard: View {
+struct AccountCard: View {
     @EnvironmentObject private var store: RunwayStore
     let account: CodexAccount
     let isActive: Bool

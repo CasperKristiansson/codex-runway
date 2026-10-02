@@ -5,7 +5,7 @@ root_dir="$(cd "$(dirname "$0")/.." && pwd)"
 app_dir="$root_dir/dist/Codex Runway.app"
 
 cd "$root_dir"
-swift build -c release
+swift build -c release "$@"
 
 rm -rf "$app_dir"
 mkdir -p "$app_dir/Contents/MacOS" "$app_dir/Contents/Resources"

@@ -1,0 +1,1 @@
+{"name":"codex-runway-local","interface":{"displayName":"Codex Runway Local"},"plugins":[{"name":"codex-runway","source":{"source":"local","path":"./"},"policy":{"installation":"AVAILABLE","authentication":"ON_INSTALL"},"category":"Productivity"}]}

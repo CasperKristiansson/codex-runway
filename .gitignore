@@ -10,3 +10,6 @@ dist/
 /research/forecast/IMPLEMENTATION.md
 __pycache__/
 *.py[cod]
+
+hub/node_modules/
+hub/test-results/

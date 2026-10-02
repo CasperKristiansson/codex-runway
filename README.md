@@ -85,3 +85,36 @@ Runway keeps one session active and does not poll saved accounts. macOS may ask 
 The feature uses the documented Codex authentication cache, not the internal external-token injection interface. OpenAI's native desktop multi-account switching is currently undocumented/unsupported; live acceptance must be checked on the installed desktop version. Public terms allow multiple accounts and prohibit circumventing limits, but do not explicitly resolve one person's use of several paid subscriptions. Manual switching does not change or reset any account's allowance.
 
 `scripts/test.sh` includes synthetic login checks with a memory vault and temporary credential files. They cover managed restart and cancellation, independent client scopes, isolated sign-in cleanup, token rotation, rollback, interrupted-switch recovery, concurrent replacement, safe file handling, managed restrictions, and refresh exclusion without accessing real credentials or Keychain sessions.
+
+## Sidebar hub
+
+Runway now has **Overview · Settings · History · Analytics** in the native window and a responsive MCP Apps hub. Overview is the default. The popup remains the compact quick view. Both native Overview surfaces reuse the same graph and account cards; display preferences are shared with the embedded hub. History and Analytics start at All active accounts on every tab entry.
+
+The plugin lives in [`hub/`](hub/README.md). It works with ordinary Codex launches: no shared-runtime launcher, Thread Desk adapter, or live chat execution transport is involved. The retained Thread Desk project is untouched.
+
+Build the web bundle and native app:
+
+```zsh
+(cd hub && npm ci --ignore-scripts && npm run build)
+./scripts/test.sh
+./scripts/test-hub.sh
+./scripts/build-app.sh
+```
+
+On this host, the macOS 27 SDK's SwiftUI macro plugin is unavailable. The verified build uses the installed 26.5 SDK:
+
+```zsh
+SDKROOT=/Library/Developer/CommandLineTools/SDKs/MacOSX26.5.sdk \
+  ./scripts/build-app.sh --disable-sandbox -debug-info-format none
+```
+
+Install the built `dist/Codex Runway.app` over `/Applications/Codex Runway.app` after quitting **Runway only**, with no account operation in progress. Keep Codex open. Relaunch Runway using its existing login LaunchAgent or the installed app. Do not run the older app and the new bundle together; an older pre-hub app does not hold the new bridge lease. The new version refuses a second native bridge owner. Preferences, archives, Keychain sessions and existing automatic schedules are retained.
+
+Register the independent plugin:
+
+```zsh
+codex plugin marketplace add /Users/casperkristiansson/programming/codex-runway/hub
+codex plugin add codex-runway@codex-runway-local
+```
+
+Open **Codex Runway** from the Codex sidebar/plugin app entry, or use `codex://plugins/codex-runway@codex-runway-local/app/open_codex_runway`. Reload its surface if it was already open. If the host requires a later app relaunch to discover new entries, do that at your convenience; no Codex restart is necessary for Runway's bridge. The plugin configuration points at this checkout's adapter, so keep this checkout available. Details, contract limits and validation evidence are in [`hub/README.md`](hub/README.md).

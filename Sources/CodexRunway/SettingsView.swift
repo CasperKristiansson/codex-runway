@@ -2,7 +2,7 @@ import SwiftUI
 
 @MainActor
 final class SettingsNavigationState: ObservableObject {
-    @Published var tab = 0 {
+    @Published var tab = 3 {
         didSet {
             if tab == 1 || tab == 2 { selectedAccountID = nil }
         }
@@ -21,17 +21,19 @@ struct SettingsView: View {
     var body: some View {
         VStack(spacing: 0) {
             Picker("Panel", selection: $navigation.tab) {
+                Text("Overview").tag(3)
                 Text("Settings").tag(0)
                 Text("History").tag(1)
                 Text("Analytics").tag(2)
             }
             .pickerStyle(.segmented)
             .labelsHidden()
-            .frame(width: 340)
+            .frame(width: 460)
             .padding(.top, 20)
             .padding(.bottom, 16)
             Divider()
-            if navigation.tab == 0 { accountSettings }
+            if navigation.tab == 3 { OverviewView() }
+            else if navigation.tab == 0 { accountSettings }
             else if navigation.tab == 1 { ProfileView(selection: $navigation.selectedAccountID) }
             else { AnalyticsView(selection: $navigation.selectedAccountID) }
         }

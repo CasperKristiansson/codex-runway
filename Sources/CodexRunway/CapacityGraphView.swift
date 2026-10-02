@@ -1,24 +1,6 @@
 import Charts
 import SwiftUI
 
-private final class CapacityGraphSelection: ObservableObject {
-    @Published var range: CapacityGraphRange {
-        didSet { UserDefaults.standard.set(range.rawValue, forKey: "codex-runway.graph-range.v1") }
-    }
-    @Published var showsPercent: Bool {
-        didSet { UserDefaults.standard.set(showsPercent, forKey: "codex-runway.graph-percent.v1") }
-    }
-    @Published var mode: CapacityViewMode {
-        didSet { UserDefaults.standard.set(mode.rawValue, forKey: "codex-runway.capacity-view.v1") }
-    }
-
-    init() {
-        range = CapacityGraphRange(rawValue: UserDefaults.standard.string(forKey: "codex-runway.graph-range.v1") ?? "") ?? .overview
-        showsPercent = UserDefaults.standard.bool(forKey: "codex-runway.graph-percent.v1")
-        mode = CapacityViewMode(rawValue: UserDefaults.standard.string(forKey: "codex-runway.capacity-view.v1") ?? "") ?? .graph
-    }
-}
-
 private struct CapacityHoverGraph<Content: View>: View {
     @StateObject private var hover = CapacityHoverSelection()
     let content: (CapacityHoverSelection) -> Content
@@ -26,37 +8,19 @@ private struct CapacityHoverGraph<Content: View>: View {
     var body: some View { content(hover) }
 }
 
-private enum CapacityViewMode: String, CaseIterable, Identifiable {
-    case graph, table
-    var id: String { rawValue }
-    var label: String { rawValue.capitalized }
-    var icon: String { self == .graph ? "chart.xyaxis.line" : "tablecells" }
-}
-
-private enum CapacityGraphRange: String, CaseIterable, Identifiable {
-    case overview, hour, sixHours, day, threeDays, week
-    var id: String { rawValue }
-    var label: String {
-        switch self { case .overview: "Overview"; case .hour: "1h"; case .sixHours: "6h"; case .day: "1d"; case .threeDays: "3d"; case .week: "7d" }
-    }
-    var lookback: TimeInterval? {
-        switch self { case .overview: nil; case .hour: 3_600; case .sixHours: 21_600; case .day: 86_400; case .threeDays: 3 * 86_400; case .week: 7 * 86_400 }
-    }
-    var tableInterval: TimeInterval {
-        switch self {
-        case .overview: 8 * 3_600
-        case .hour: 10 * 60
-        case .sixHours: 3_600
-        case .day: 4 * 3_600
-        case .threeDays: 12 * 3_600
-        case .week: 86_400
-        }
-    }
-}
-
 struct CapacityGraphView: View {
     @EnvironmentObject private var store: RunwayStore
-    @StateObject private var selection = CapacityGraphSelection()
+    var expanded = false
+    var body: some View {
+        CapacityGraphContent(selection: store.displayPreferences, expanded: expanded)
+    }
+}
+
+private struct CapacityGraphContent: View {
+    @EnvironmentObject private var store: RunwayStore
+    @ObservedObject var selection: RunwayDisplayPreferences
+    let expanded: Bool
+    private var displayHeight: CGFloat { expanded ? 300 : CapacityDisplayLayout.height }
 
     var body: some View {
         TimelineView(.periodic(from: .now, by: 60)) { context in
@@ -130,13 +94,13 @@ struct CapacityGraphView: View {
                                 graph(report, range: selection.range, now: context.date, hover: hover)
                             }
                             .id(selection.range)
-                            .frame(height: CapacityDisplayLayout.height)
+                            .frame(height: displayHeight)
                         } else {
                             table(report, range: selection.range, now: context.date)
                         }
                     }
                     // Range and view changes must not alter the open panel's frame.
-                    .frame(height: CapacityDisplayLayout.height, alignment: .top)
+                    .frame(height: displayHeight, alignment: .top)
                 }
             }
             .padding(10)
@@ -167,10 +131,10 @@ struct CapacityGraphView: View {
                     tableRows(Array(rows), upcoming: upcoming, range: range)
                         .background(RunwayScrollerInstaller())
                 }
-                .frame(height: CapacityDisplayLayout.rowsHeight)
+                .frame(height: expanded ? displayHeight - 26 : CapacityDisplayLayout.rowsHeight)
             } else {
                 tableRows(Array(rows), upcoming: [], range: range)
-                    .frame(height: CapacityDisplayLayout.rowsHeight, alignment: .top)
+                    .frame(height: expanded ? displayHeight - 26 : CapacityDisplayLayout.rowsHeight, alignment: .top)
             }
         }
         .accessibilityLabel(range == .overview
