@@ -51,6 +51,7 @@ private final class LifecycleFixture {
     var closes = 0
     var opens = 0
     var isOpen = true
+    var revoked = false
     var declineQuit = false
     var failLaunch = false
     var browserOpened = false
@@ -237,6 +238,12 @@ struct LoginChecks {
         precondition(!CodexProcessGuard.isCodexExecutable("/Applications/ChatGPT.app/Contents/MacOS/ChatGPT"))
         precondition(!CodexProcessGuard.isCodexExecutable("/Applications/Codex Runway.app/Contents/MacOS/CodexRunway"))
 
+        func savedUsage(_ id: String, _ configuration: CodexLoginConfiguration) throws -> ActiveCodexAccount {
+            let login = try vault.load(id: id)
+            return ActiveCodexAccount(identity: response(login.profile.email),
+                rateLimits: RateLimitsReadResponse(accountId: login.profile.accountID,
+                    rateLimits: RateLimitSnapshot(primary: LimitWindow(usedPercent: 0, resetsAt: nil), planType: "pro"), rateLimitResetCredits: nil))
+        }
         // Store-level exclusion covers manual, scheduled and queued refreshes.
         let suite = "runway-login-checks.\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: suite)!
@@ -252,7 +259,7 @@ struct LoginChecks {
                 await store.refreshAnalyticsForSignedInAccount()
                 try await Task.sleep(for: .milliseconds(10))
                 return config
-            }, verifyLogin: { response("second@example.com") }, closeDesktop: { fixture.open = false; return false }, openDesktop: {}, readAccount: {
+            }, verifyLogin: { response("second@example.com") }, readSavedUsage: savedUsage, closeDesktop: { fixture.open = false; return false }, openDesktop: {}, readAccount: {
                 readCalls += 1
                 throw CodexAppServerError.invalidResponse
             })
@@ -287,6 +294,9 @@ struct LoginChecks {
                 precondition(recovery.record != nil)
                 precondition(!lifecycle.isOpen)
                 return response("second@example.com")
+            }, readSavedUsage: { id, config in
+                if lifecycle.revoked { throw CodexAppServerError.authenticationExpired }
+                return try savedUsage(id, config)
             }, closeDesktop: {
                 lifecycle.closes += 1
                 if lifecycle.declineQuit { throw LoginSwitchError.quitFailed }
@@ -302,6 +312,12 @@ struct LoginChecks {
         fixture.open = true
         await lifecycleStore.switchLogin(id: firstProfile.id)
         precondition(lifecycle.closes == 0 && lifecycle.opens == 0 && !lifecycleStore.loginStatusIsError)
+        // Revoked sessions fail before Codex is closed or credentials replaced.
+        lifecycle.revoked = true
+        await lifecycleStore.switchLogin(id: secondProfile.id)
+        try check(lifecycle.closes == 0 && lifecycle.opens == 0 && lifecycleStore.loginStatusIsError && (try read()) == previous)
+        precondition(lifecycleStore.loginStatusMessage?.contains("Add Account") == true)
+        lifecycle.revoked = false
         lifecycle.declineQuit = true
         await lifecycleStore.switchLogin(id: secondProfile.id)
         try check(lifecycle.closes == 1 && lifecycle.opens == 0 && lifecycleStore.loginStatusIsError && (try read()) == previous)
@@ -321,7 +337,7 @@ struct LoginChecks {
 
         // A cancellation during graceful quit cannot reach the auth transaction.
         let cancellingStore = RunwayStore(defaults: defaults, analyticsEnabled: false, loginSwitcher: switcher,
-            readLoginConfiguration: { config }, closeDesktop: {
+            readLoginConfiguration: { config }, readSavedUsage: savedUsage, closeDesktop: {
                 try await CodexDesktopLifecycle.waitForExit { true }
                 return true
             }, openDesktop: {})
@@ -514,22 +530,38 @@ struct LoginChecks {
             if 'id' not in request: continue
             method = request['method']
             if method == 'initialize': result = {}
-            elif method == 'config/read': result = {'config': {'cli_auth_credentials_store': 'file'}}
+            elif method == 'config/read': result = {'config': {'cli_auth_credentials_store': 'file'}, 'padding': 'fragmented-response-' * 20000}
             elif method == 'account/read':
-                assert request['params']['refreshToken'] is True
                 result = {'account': {'type': 'chatgpt', 'email': 'second@example.com', 'planType': 'pro'}}
+            elif method == 'account/rateLimits/read': result = {'rateLimits': {}}
             else: raise RuntimeError('Unexpected method')
-            print(json.dumps({'id': request['id'], 'result': result}), flush=True)
+            response = json.dumps({'id': request['id'], 'result': result}) + '\\n'
+            # Force many pipe reads, with unsolicited messages alongside responses.
+            for offset in range(0, len(response), 1024):
+                sys.stdout.write(response[offset:offset + 1024]); sys.stdout.flush()
+            print(json.dumps({'method': 'diagnostic/notification', 'params': {}}), flush=True)
         """
         try Data(program.utf8).write(to: server)
         try fm.setAttributes([.posixPermissions: 0o700], ofItemAtPath: server.path)
         let client = CodexAppServerClient()
-        for _ in 0..<3 {
+        for _ in 0..<20 {
             let readConfiguration = try await client.readLoginConfiguration(executablePath: server.path)
             precondition(readConfiguration.storage == "file")
             let identity = try await client.verifyLogin(executablePath: server.path)
             precondition(identity.account?.email == "second@example.com")
         }
+        // Cached identity is insufficient: a revoked quota request must fail
+        // verification and produce an actionable error without raw server JSON.
+        let revokedServer = root.appendingPathComponent("synthetic-revoked-server")
+        let revokedProgram = program.replacingOccurrences(
+            of: "elif method == 'account/rateLimits/read': result = {'rateLimits': {}}",
+            with: "elif method == 'account/rateLimits/read':\n        print(json.dumps({'id': request['id'], 'error': {'message': '401 Unauthorized token_revoked'}}), flush=True); continue")
+        try Data(revokedProgram.utf8).write(to: revokedServer)
+        try fm.setAttributes([.posixPermissions: 0o700], ofItemAtPath: revokedServer.path)
+        do {
+            _ = try await client.verifyLogin(executablePath: revokedServer.path)
+            preconditionFailure("Cached account identity must not validate a revoked session")
+        } catch CodexAppServerError.authenticationExpired {}
         // Real transport: isolated environment, early completion notification,
         // normal OAuth params, and cancellation while waiting for the browser.
         let loginServer = root.appendingPathComponent("synthetic-login-server")

@@ -52,6 +52,7 @@ struct ResetCredits: Decodable {
 enum CodexAppServerError: LocalizedError {
     case executableNotFound
     case invalidResponse
+    case authenticationExpired
     case server(String)
 
     var errorDescription: String? {
@@ -60,6 +61,8 @@ enum CodexAppServerError: LocalizedError {
             return "Codex CLI was not found. Set its path in Settings."
         case .invalidResponse:
             return "Codex returned an invalid usage response."
+        case .authenticationExpired:
+            return "This Codex login has expired or was revoked. Sign in again."
         case .server(let message):
             return message
         }
@@ -72,6 +75,8 @@ actor CodexAppServerClient {
     private var process: Process?
     private var stdin: FileHandle?
     private var buffer = Data()
+    private var outputReader: Task<Void, Never>?
+    private var outputContinuation: AsyncStream<Data>.Continuation?
     private var pending: [Int: CheckedContinuation<Data, Error>] = [:]
     private var nextID = 1
     private var loginNotifications: [Data] = []
@@ -147,15 +152,24 @@ actor CodexAppServerClient {
             forcedWorkspaceID: config["forced_chatgpt_workspace_id"] as? String)
     }
 
-    /// Verifies just the selected login, allowing Codex to refresh its tokens.
-    /// Does not fetch quota, profile history, or other accounts.
+    /// Verifies the selected login with an authenticated quota request,
+    /// allowing Codex to refresh its tokens. Does not fetch profile history.
     func verifyLogin(executablePath: String? = nil) async throws -> AccountReadResponse {
         try start(executablePath: executablePath)
         defer { stop() }
         _ = try await request(method: "initialize", params: ["clientInfo": ["name": "codex-runway", "version": "0.1.0"]])
         notify(method: "initialized")
-        return try JSONDecoder().decode(AccountReadResponse.self,
+        let identity = try JSONDecoder().decode(AccountReadResponse.self,
             from: await request(method: "account/read", params: ["refreshToken": true]))
+        // account/read can return cached identity even for a revoked session.
+        // A successful quota request verifies that the credentials are accepted.
+        _ = try await request(method: "account/rateLimits/read", params: nil)
+        let after = try JSONDecoder().decode(AccountReadResponse.self,
+            from: await request(method: "account/read", params: ["refreshToken": false]))
+        guard identity == after, identity.account?.type == "chatgpt" else {
+            throw LoginSwitchError.verificationFailed
+        }
+        return identity
     }
 
     func readActiveProfile(executablePath: String? = nil) async throws -> ActiveAccountProfile {
@@ -260,10 +274,14 @@ actor CodexAppServerClient {
         process.standardOutput = output
         process.standardError = FileHandle.nullDevice
 
-        output.fileHandleForReading.readabilityHandler = { [weak self, weak process] handle in
+        // A response can span several pipe reads. Independent Tasks per read
+        // can reach the actor out of order and corrupt the JSON. Feed one FIFO
+        // stream into one reader instead.
+        let (chunks, continuation) = AsyncStream<Data>.makeStream()
+        output.fileHandleForReading.readabilityHandler = { handle in
             let data = handle.availableData
-            guard !data.isEmpty, let pid = process?.processIdentifier else { return }
-            Task { await self?.receive(data, pid: pid) }
+            if data.isEmpty { continuation.finish() }
+            else { continuation.yield(data) }
         }
         process.terminationHandler = { [weak self] child in
             let pid = child.processIdentifier
@@ -273,6 +291,14 @@ actor CodexAppServerClient {
         try process.run()
         self.process = process
         stdin = input.fileHandleForWriting
+        outputContinuation = continuation
+        let pid = process.processIdentifier
+        outputReader = Task { [weak self] in
+            for await chunk in chunks {
+                guard !Task.isCancelled else { break }
+                await self?.receive(chunk, pid: pid)
+            }
+        }
     }
 
     private func stop() {
@@ -283,6 +309,10 @@ actor CodexAppServerClient {
         pending.removeAll()
         process?.standardOutput.map { ($0 as? Pipe)?.fileHandleForReading.readabilityHandler = nil }
         process?.terminationHandler = nil
+        outputContinuation?.finish()
+        outputContinuation = nil
+        outputReader?.cancel()
+        outputReader = nil
         try? stdin?.close()
         if let process {
             let pid = process.processIdentifier
@@ -327,7 +357,7 @@ actor CodexAppServerClient {
         let timeout = Task {
             try await Task.sleep(for: .seconds(30))
             pending.removeValue(forKey: id)?.resume(
-                throwing: CodexAppServerError.server("Codex refresh timed out. It will retry automatically.")
+                throwing: CodexAppServerError.server("Codex did not respond to \(method) within 30 seconds. Try again.")
             )
         }
         defer { timeout.cancel() }
@@ -376,7 +406,12 @@ actor CodexAppServerClient {
         else { return }
 
         if let error = value["error"] as? [String: Any], let message = error["message"] as? String {
-            continuation.resume(throwing: CodexAppServerError.server(message))
+            let authenticationCodes = ["token_revoked", "refresh_token_reused", "refresh_token_expired", "refresh_token_invalidated", "401 unauthorized"]
+            if authenticationCodes.contains(where: { message.lowercased().contains($0) }) {
+                continuation.resume(throwing: CodexAppServerError.authenticationExpired)
+            } else {
+                continuation.resume(throwing: CodexAppServerError.server(message))
+            }
             return
         }
         guard let result = value["result"], JSONSerialization.isValidJSONObject(result), let data = try? JSONSerialization.data(withJSONObject: result) else {

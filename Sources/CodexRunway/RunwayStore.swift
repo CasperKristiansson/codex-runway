@@ -128,13 +128,13 @@ final class RunwayStore: ObservableObject {
             let configuration = try await self.readLoginConfiguration()
             try configuration.validate()
             self.loginCanCancel = true
-            self.setLoginMessage("Complete sign-in in your browser. Your current Codex login stays selected.")
+            self.setLoginMessage("Complete sign-in in your browser.")
             let data = try await self.signIn(configuration)
             try Task.checkCancellation()
             self.loginCanCancel = false
             let profile = try self.loginSwitcher.importLogin(data, configuration: configuration)
             self.reloadSavedLogins()
-            self.setLoginMessage("Added \(profile.email). Select it when you’re ready to switch.")
+            self.setLoginMessage("Added \(profile.email).")
         }
     }
 
@@ -153,6 +153,12 @@ final class RunwayStore: ObservableObject {
                 }
                 return
             }
+            self.setLoginMessage("Checking saved session…")
+            do { _ = try await self.readSavedUsage(id, configuration) }
+            catch CodexAppServerError.authenticationExpired {
+                throw CodexAppServerError.server("This saved login has expired or was revoked. Use Add Account to sign in again.")
+            }
+            try Task.checkCancellation()
             try await self.withDesktopClosed(reopen: openCodex) {
                 let profile = try await self.loginSwitcher.activate(id: id, configuration: configuration,
                     verify: self.verifyLogin, progress: { self.setLoginMessage($0) })
@@ -185,7 +191,7 @@ final class RunwayStore: ObservableObject {
     /// replacement starts, finish verification or rollback before allowing cancellation.
     private func withDesktopClosed(reopen: Bool, action: () async throws -> Void) async throws {
         loginCanCancel = true
-        setLoginMessage("Closing Codex… Finish or stop active tasks if Codex asks.")
+        setLoginMessage("Closing Codex…")
         let wasOpen = try await closeDesktop()
         loginCanCancel = false
         do {
@@ -226,7 +232,7 @@ final class RunwayStore: ObservableObject {
         do {
             try loginSwitcher.forget(id: id)
             reloadSavedLogins()
-            setLoginMessage("Saved login removed. The current Codex login and account history are kept.")
+            setLoginMessage("Saved login removed.")
         } catch { setLoginMessage(error.localizedDescription, isError: true) }
     }
 

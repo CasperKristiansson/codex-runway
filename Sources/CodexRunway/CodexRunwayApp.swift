@@ -91,26 +91,11 @@ struct MenuBarView: View {
                         .disabled(store.loginActionsDisabled)
                         .controlSize(.small)
                 }
-                Text(store.savedLogins.isEmpty ? "Auto-refresh · 15 min" : "15 min refresh")
+                Text("Auto-refresh · 15 min")
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .help("Current account refreshes every 15 minutes. Other accounts show their last saved status.")
                 Spacer()
-                if !store.savedLogins.isEmpty {
-                    Menu {
-                        ForEach(store.savedLogins) { login in
-                            Button("Switch to \(login.email)") {
-                                Task { await store.switchLogin(id: login.id) }
-                            }
-                        }
-                    } label: {
-                        Label("Switch", systemImage: "arrow.triangle.2.circlepath")
-                    }
-                    .menuStyle(.borderlessButton)
-                    .fixedSize()
-                    .disabled(store.loginActionsDisabled || store.loginRecoveryPending)
-                    .help("Select a saved account; Runway closes and reopens Codex for you")
-                }
                 Button(action: openSettings) {
                     Label("Settings", systemImage: "gearshape")
                 }

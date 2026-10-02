@@ -43,21 +43,23 @@ struct SettingsView: View {
     private var accountSettings: some View {
         Form {
             Section("Saved Logins") {
-                Text("Add each account once. When you switch, Runway closes Codex normally, selects the account, and reopens it. Finish or stop active tasks if Codex asks.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
                 HStack {
                     Button("Add Account…") { Task { await store.addLogin() } }
                         .disabled(store.loginActionsDisabled || store.loginRecoveryPending)
-                    Button("Save Current Login") { Task { await store.saveCurrentLogin() } }
+                    Button("Save") { Task { await store.saveCurrentLogin() } }
                         .disabled(store.loginActionsDisabled || store.loginRecoveryPending)
+                        .help("Save the current Codex login")
                     if store.isManagingLogin { ProgressView().controlSize(.small) }
                     if store.loginCanCancel {
                         Button("Cancel") { store.cancelLoginOperation() }
                     }
                     Spacer()
-                    Button("Reload") { store.reloadSavedLogins() }
-                        .disabled(store.isManagingLogin)
+                    Button { store.reloadSavedLogins() } label: {
+                        Image(systemName: "arrow.clockwise")
+                    }
+                    .disabled(store.isManagingLogin)
+                    .help("Reload saved logins")
+                    .accessibilityLabel("Reload saved logins")
                 }
                 if store.loginRecoveryPending {
                     Button("Recover Switch") { Task { await store.recoverLogin() } }
@@ -65,13 +67,9 @@ struct SettingsView: View {
                 }
                 ForEach(store.savedLogins) { login in
                     HStack {
-                        VStack(alignment: .leading, spacing: 3) {
-                            Text(login.email).font(.subheadline.weight(.medium))
-                            Text("Saved \(login.savedAt.formatted(date: .abbreviated, time: .shortened))")
-                                .font(.caption).foregroundStyle(.secondary)
-                        }
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        Button("Switch & Open") { Task { await store.switchLogin(id: login.id) } }
+                        Text(login.email).font(.subheadline.weight(.medium))
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                        Button("Switch") { Task { await store.switchLogin(id: login.id) } }
                             .disabled(store.loginActionsDisabled || store.loginRecoveryPending)
                             .accessibilityLabel("Switch to \(login.email) and open Codex")
                         Button("Forget") { store.forgetLogin(id: login.id) }
@@ -83,21 +81,11 @@ struct SettingsView: View {
                     Text(message).font(.caption)
                         .foregroundStyle(store.loginStatusIsError ? Color.red : Color.secondary)
                 }
-                Text("Saved sessions stay in this Mac's Keychain and are excluded from Runway backups. Expired or revoked sessions may require signing in again. Switching never signs into other accounts in the background.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
             }
             Section("Accounts") {
-                Text("Use the arrows to set the account order in the menu.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
                 ForEach(store.accounts) { account in
                     AccountSettingsRow(account: account)
                 }
-
-                Text("Inactive accounts are hidden from the dashboard and excluded from the graph. Their saved history is kept, and you can activate them again anytime.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
             }
             Section("Backups") {
                 HStack {
