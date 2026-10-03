@@ -1,5 +1,8 @@
 export const known = value => typeof value === 'number' && Number.isFinite(value);
 export const number = (value, decimals=0) => known(value) ? value.toLocaleString(undefined,{maximumFractionDigits:decimals}) : '—';
+const countFormats=Object.fromEntries(['long','short'].map(display=>[display,new Intl.NumberFormat('en',{notation:'compact',compactDisplay:display,maximumFractionDigits:1})]));
+// Words make hover counts easy to read; short labels keep chart axes compact.
+export const count = (value, display='long') => !known(value)?'—':Math.abs(value)>=1000?countFormats[display].format(value):number(value,display==='short'?1:0);
 export const stamp = value => known(value) ? new Date(value*1000).toLocaleString(undefined,{month:'short',day:'numeric',hour:'2-digit',minute:'2-digit'}) : 'Unknown';
 export const scale = (value, percent) => known(value) ? value*(percent?25:1) : null;
 // Give a visible reset priority over denser readings within 12 screen pixels.
@@ -17,7 +20,7 @@ export const detailText = detail => [detail.heading,...detail.rows.map(r=>`${r.l
 export function activityDetails(day, values, type) {
  const suffix=type==='usage'?'%':type==='messages'?' messages':' calls',entries=Object.entries(values);
  const total=entries.every(([,v])=>known(v))?entries.reduce((s,[,v])=>s+v,0):null;
- const format=v=>known(v)?`${number(v,type==='usage'?2:0)}${suffix}`:'—';
+ const format=v=>known(v)?`${type==='usage'?number(v,2):count(v)}${suffix}`:'—';
  return {heading:day,rows:entries.map(([label,value])=>({label,value:format(value)})),caption:`Daily total: ${format(total)}${type==='usage'&&known(total)?' of limit':''}`};
 }
 export function operationNotice(data, now=Date.now()/1000) {

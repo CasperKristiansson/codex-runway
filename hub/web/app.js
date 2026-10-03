@@ -1,7 +1,7 @@
 import { showInspector, hideInspector } from './inspector.js';
 import { createDropdown, closeDropdown, dropdownIsOpen } from './dropdown.js';
 import { App } from '@modelcontextprotocol/ext-apps';
-import { known, number, stamp, scale, health, series, heatmap, chartBounds, label, activityDetails, detailText, operationNotice, chartHoverIndex } from './presentation.js';
+import { known, number, count, stamp, scale, health, series, heatmap, chartBounds, label, activityDetails, detailText, operationNotice, chartHoverIndex } from './presentation.js';
 const uuid=()=>{if(crypto.randomUUID)return crypto.randomUUID();const b=crypto.getRandomValues(new Uint8Array(16));b[6]=(b[6]&15)|64;b[8]=(b[8]&63)|128;const h=[...b].map(v=>v.toString(16).padStart(2,'0')).join('');return `${h.slice(0,8)}-${h.slice(8,12)}-${h.slice(12,16)}-${h.slice(16,20)}-${h.slice(20)}`;};
 const $=id=>document.getElementById(id);
 const el=(tag,cls,text)=>{const node=document.createElement(tag);if(cls)node.className=cls;if(text!==undefined)node.textContent=text;return node;};
@@ -86,7 +86,7 @@ function activeName(){return accountID?data.accounts.find(a=>a.id===accountID)?.
 function table(headers,rows){const wrap=el('div','table-wrap'),t=el('table'),head=el('thead'),tr=el('tr');headers.forEach((h,i)=>tr.append(el('th',i?'number':'',h)));head.append(tr);const body=el('tbody');for(const values of rows){const row=el('tr');values.forEach((v,i)=>{const td=el('td',i?'number':'');if(v instanceof Node)td.append(v);else td.textContent=v;row.append(td);});body.append(row);}t.append(head,body);wrap.append(t);return wrap;}
 // A responsive SVG with a single keyboard focus target. Arrow/Home/End keys
 // inspect points; hover and keyboard use the same detail string.
-function chart({lines,start,end,bounds,details,events=[],title,stacked=false}) {
+function chart({lines,start,end,bounds,details,events=[],title,stacked=false,compactCounts=false}) {
  const wrap=el('div','chart'),svg=document.createElementNS('http://www.w3.org/2000/svg','svg');svg.setAttribute('preserveAspectRatio','none');svg.tabIndex=0;svg.setAttribute('role','group');svg.setAttribute('aria-label',`${title}. Use left and right arrow keys to inspect saved values.`);
  const detail=el('output','chart-details','Hover the graph or focus it and use arrow keys for details.');
  const points=lines.flatMap(l=>l.points).filter(p=>known(p.x)&&known(p.y));const times=[...new Set([...points.map(p=>p.x),...events.map(e=>e.date)].filter(t=>t>=start&&t<=end))].sort((a,b)=>a-b);const resetDates=events.filter(e=>known(e.date)&&e.date>=start&&e.date<=end).map(e=>e.date),resetTimes=new Set(resetDates);let hovering=false,pointerY=null;
@@ -94,7 +94,7 @@ function chart({lines,start,end,bounds,details,events=[],title,stacked=false}) {
  svg.replaceChildren();svg.setAttribute('viewBox',`0 0 ${width} 240`);const plotWidth=width-63;
  const [low,high]=bounds||chartBounds(points.map(p=>p.y));const x=t=>48+(t-start)/Math.max(1,end-start)*plotWidth,y=v=>210-(v-low)/Math.max(.01,high-low)*190;
  function shape(tag,attrs,text,parent=svg){const node=document.createElementNS(svg.namespaceURI,tag);Object.entries(attrs).forEach(([k,v])=>node.setAttribute(k,v));if(text!==undefined)node.textContent=text;parent.append(node);return node;}
- for(let i=0;i<4;i++){const v=low+(high-low)*i/3;shape('line',{x1:48,y1:y(v),x2:width-15,y2:y(v),stroke:'#eeeef5'});shape('text',{x:40,y:y(v)+3,'text-anchor':'end'},number(v,1));}
+ for(let i=0;i<4;i++){const v=low+(high-low)*i/3;shape('line',{x1:48,y1:y(v),x2:width-15,y2:y(v),stroke:'#eeeef5'});shape('text',{x:40,y:y(v)+3,'text-anchor':'end'},compactCounts?count(v,'short'):number(v,1));}
  for(let i=0;i<4;i++){const t=start+(end-start)*i/3;shape('text',{x:x(t),y:234,'text-anchor':i===0?'start':i===3?'end':'middle'},stamp(t).split(',').slice(0,1).join(','));}
  const clipID=`clip-${uuid()}`;const defs=document.createElementNS(svg.namespaceURI,'defs'),clip=document.createElementNS(svg.namespaceURI,'clipPath'),rect=document.createElementNS(svg.namespaceURI,'rect');clip.id=clipID;Object.entries({x:48,y:10,width:plotWidth,height:200}).forEach(([k,v])=>rect.setAttribute(k,v));clip.append(rect);defs.append(clip);svg.append(defs);
  const bottoms=new Map();
@@ -198,10 +198,10 @@ function history(){
  const cells=[],days=weeks.flat(),entry=days.findLastIndex(d=>!d.hidden&&d.value>0);
  days.forEach((d,index)=>{
   const b=button('',()=>{},false);b.tabIndex=index===Math.max(0,entry)?0:-1;b.className=`heatmap-cell level-${d.level}`;if(d.hidden){b.style.visibility='hidden';b.setAttribute('aria-hidden','true');}
-  const dateLabel=mode==='Daily'?d.date:`Week of ${d.week}`,text=`${dateLabel} · ${number(d.value)} tokens${mode==='Cumulative'?' · Cumulative total':''}`;b.setAttribute('aria-label',text);
+  const dateLabel=mode==='Daily'?d.date:`Week of ${d.week}`,text=`${dateLabel} · ${count(d.value)} tokens${mode==='Cumulative'?' · Cumulative total':''}`;b.setAttribute('aria-label',`${dateLabel} · ${number(d.value)} tokens${mode==='Cumulative'?' · Cumulative total':''}`);
   function inspect(){
    details.textContent=text;cells.forEach((c,i)=>c.classList.toggle('is-inspected',mode==='Daily'?i===index:Math.floor(i/7)===Math.floor(index/7)));const rect=b.getBoundingClientRect();
-   showInspector(grid,{heading:dateLabel,rows:[{label:mode==='Daily'?'Tokens':mode==='Weekly'?'Weekly tokens':'Cumulative tokens',value:number(d.value),color:'#2e66c9'}]},{x:rect.left+rect.width/2,y:rect.top+rect.height/2},'heatmap');
+   showInspector(grid,{heading:dateLabel,rows:[{label:mode==='Daily'?'Tokens':mode==='Weekly'?'Weekly tokens':'Cumulative tokens',value:count(d.value),color:'#2e66c9'}]},{x:rect.left+rect.width/2,y:rect.top+rect.height/2},'heatmap');
   }
   b.onpointerenter=inspect;b.onfocus=()=>requestAnimationFrame(()=>{if(document.activeElement===b)inspect();});b.onblur=()=>{if(!grid.matches(':hover')){hideInspector(grid);cells.forEach(c=>c.classList.remove('is-inspected'));}};b.onkeydown=e=>{if(e.key==='Escape'){e.preventDefault();hideInspector(grid);cells.forEach(c=>c.classList.remove('is-inspected'));return;}const offsets={ArrowLeft:-7,ArrowRight:7,ArrowUp:-1,ArrowDown:1};if(e.key in offsets||['Home','End'].includes(e.key)){e.preventDefault();const next=e.key==='Home'?0:e.key==='End'?days.findLastIndex(c=>!c.hidden):Math.max(0,Math.min(cells.length-1,index+offsets[e.key]));if(!days[next].hidden){cells.forEach(c=>c.tabIndex=-1);cells[next].tabIndex=0;cells[next].focus();}}};cells.push(b);grid.append(b);
  });grid.onpointerleave=()=>{if(!grid.contains(document.activeElement)){hideInspector(grid);cells.forEach(c=>c.classList.remove('is-inspected'));}};
@@ -214,9 +214,9 @@ function history(){
 function activityPanel(title,type,group,days,changeDays,changeGroup,showPeriod=true){
  const a=datasets.get(`analytics:${accountID||''}`),p=panel(),controls=el('div','toolbar');if(showPeriod)controls.append(segmented(`${title} period`,[['7','7d'],['30','30d'],['365','1y']],String(days),v=>{changeDays(Number(v));render();}));if(changeGroup)controls.append(select('Group by',type==='usage'?[['features','Feature'],['models','Model'],['surfaces','Surface']]:[['models','Model'],['surfaces','Surface']],group,v=>{changeGroup(v);render();},`${type} grouping`));const head=el('div','panel-head');head.append(el('h3','',title),controls);p.append(head);
  const s=series(a.accounts,type,group,days,data.generatedAt*1000);if(!s.rows.length||!s.names.length){p.append(note('No activity readings saved for this period.','empty'));return p;}
- p.append(note(`${number(s.total,type==='usage'?1:0)} ${type==='usage'?'% of limit':type==='messages'?'messages':'calls'} across saved readings`,'activity-total'));
+ p.append(note(`${type==='usage'?number(s.total,1):count(s.total)} ${type==='usage'?'% of limit':type==='messages'?'messages':'calls'} across saved readings`,'activity-total'));
  const start=data.generatedAt-(days-1)*86400-43200,end=data.generatedAt+43200;
- p.append(chart({title,start,end,stacked:type==='usage',bounds:[0,Math.max(1,...s.rows.map(r=>type==='usage'?Object.values(r.values).reduce((s,v)=>s+v,0):Math.max(...Object.values(r.values))))],lines:s.names.map((name,index)=>({color:colors[index],gaps:true,points:s.rows.map(r=>({x:Date.parse(`${r.day}T12:00:00Z`)/1000,y:r.values[name]}))})),details:t=>{const day=new Date(t*1000).toISOString().slice(0,10),row=s.rows.find(r=>r.day===day);if(!row)return {heading:day,rows:[],caption:'No saved reading'};const content=activityDetails(day,row.values,type);content.rows.forEach((r,i)=>r.color=colors[i%colors.length]);return content;}}));
+ p.append(chart({title,start,end,stacked:type==='usage',compactCounts:type!=='usage',bounds:[0,Math.max(1,...s.rows.map(r=>type==='usage'?Object.values(r.values).reduce((s,v)=>s+v,0):Math.max(...Object.values(r.values))))],lines:s.names.map((name,index)=>({color:colors[index],gaps:true,points:s.rows.map(r=>({x:Date.parse(`${r.day}T12:00:00Z`)/1000,y:r.values[name]}))})),details:t=>{const day=new Date(t*1000).toISOString().slice(0,10),row=s.rows.find(r=>r.day===day);if(!row)return {heading:day,rows:[],caption:'No saved reading'};const content=activityDetails(day,row.values,type);content.rows.forEach((r,i)=>r.color=colors[i%colors.length]);return content;}}));
  const legend=el('div','legend');s.names.forEach((name,index)=>{const n=el('span','',name);n.style.setProperty('--color',colors[index]);legend.append(n);});p.append(legend);
  if(type==='usage'){const total=Object.values(s.totals).reduce((s,v)=>s+v,0);p.append(table(['Category','Share of saved usage'],Object.entries(s.totals).sort((a,b)=>b[1]-a[1]).slice(0,6).map(([name,v])=>[name,`${number(v/total*100,1)}%`])));}return p;
 }
