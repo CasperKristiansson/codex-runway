@@ -30,19 +30,19 @@ struct ProfileView: View {
                     .labelsHidden()
                     .frame(width: 260)
                     Spacer()
-                    if let error = store.profileRefreshError ?? store.refreshError {
+                    if let error = store.profileRefreshError {
                         Image(systemName: "exclamationmark.circle")
                             .foregroundStyle(.orange)
                             .help(error)
                             .accessibilityLabel("Profile refresh error: \(error)")
                     }
                     Button {
-                        Task { await store.refreshProfile() }
+                        Task { await store.refreshProfile(accountID: selection) }
                     } label: {
                         Label(store.isRefreshingProfile ? "Refreshing…" : "Refresh profile", systemImage: "arrow.clockwise")
                     }
-                    .disabled(store.isRefreshing)
-                    .help("Fetch the currently signed-in account, even if its saved profile is less than 6h old.")
+                    .disabled(store.loginActionsDisabled || store.loginRecoveryPending || included.isEmpty)
+                    .help("Refresh every selected account, even if its profile is less than 6h old. Save inactive accounts’ logins in Settings first.")
                 }
                 .padding(.bottom, 22)
 

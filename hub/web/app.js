@@ -180,9 +180,9 @@ function settings(){
  if(uncertain)receipts.append(button('Retry last request with same ID',()=>command(uncertain.action,Object.fromEntries(Object.entries(uncertain).filter(([k])=>!['action','requestID'].includes(k))),uncertain.requestID),mutationsDisabled()));root.append(receipts);return root;
 }
 function history(){
- const root=el('div','history-page');root.append(heading('History','Profile totals and token activity',[accountFilter(),button(data.status.profileRefreshing?'Refreshing…':'Refresh profile',()=>command('refreshProfile'),mutationsDisabled()||data.status.recoveryPending)]));
+ const root=el('div','history-page');root.append(heading('History','Profile totals and token activity',[accountFilter(),button(data.status.profileRefreshing?'Refreshing…':'Refresh profile',()=>command('refreshProfile',accountID?{accountID}:{}),mutationsDisabled()||data.status.recoveryPending)]));
  const h=datasets.get(`history:${accountID||''}`);if(!h){root.append(note('Loading saved profile…','empty'));return root;}
- if(!h.available){root.append(note('No saved profile yet. Refresh profile fetches the currently signed-in account.','empty'));return root;}
+ if(!h.available){root.append(note('No saved profile yet. Refresh profile fetches the selected accounts. Save inactive accounts’ logins in Settings first.','empty'));return root;}
  const profile=el('section','history-profile'),identity=el('div','profile-identity'),avatar=el('div','profile-avatar');
  if(accountID)avatar.textContent=activeName().slice(0,2).toUpperCase();else {
   const icon=document.createElementNS('http://www.w3.org/2000/svg','svg');icon.setAttribute('viewBox','0 0 24 24');icon.setAttribute('aria-hidden','true');
@@ -221,7 +221,7 @@ function activityPanel(title,type,group,days,changeDays,changeGroup,showPeriod=t
  if(type==='usage'){const total=Object.values(s.totals).reduce((s,v)=>s+v,0);p.append(table(['Category','Share of saved usage'],Object.entries(s.totals).sort((a,b)=>b[1]-a[1]).slice(0,6).map(([name,v])=>[name,`${number(v/total*100,1)}%`])));}return p;
 }
 function analytics(){
- const root=el('div','analytics-page');root.append(heading('Analytics','Usage, chats, and tool activity',[accountFilter(),button(data.status.analyticsRefreshing?'Syncing…':'Sync now',()=>command('refreshAnalytics'),mutationsDisabled()||!data.currentAccountID||data.status.recoveryPending)]));
+ const root=el('div','analytics-page');root.append(heading('Analytics','Usage, chats, and tool activity',[accountFilter(),button(data.status.analyticsRefreshing?'Syncing…':'Sync now',()=>command('refreshAnalytics',accountID?{accountID}:{}),mutationsDisabled()||data.status.recoveryPending)]));
  const a=datasets.get(`analytics:${accountID||''}`);if(!a){root.append(note('Loading saved Analytics…','empty'));return root;}
  
  if(!a.savedCount){root.append(note('Analytics appears after the signed-in account syncs. Other accounts display their saved archives.','empty'));return root;}

@@ -172,8 +172,9 @@ actor CodexAppServerClient {
         return identity
     }
 
-    func readActiveProfile(executablePath: String? = nil) async throws -> ActiveAccountProfile {
-        try start(executablePath: executablePath)
+    func readActiveProfile(executablePath: String? = nil, home: URL? = nil,
+                           configuration: CodexLoginConfiguration? = nil) async throws -> ActiveAccountProfile {
+        try start(executablePath: executablePath, home: home, configuration: configuration)
         defer { stop() }
         _ = try await request(method: "initialize", params: [
             "clientInfo": ["name": "codex-runway", "version": "0.1.0"],
@@ -181,7 +182,7 @@ actor CodexAppServerClient {
         ])
         notify(method: "initialized")
         let before = try JSONDecoder().decode(AccountReadResponse.self,
-            from: await request(method: "account/read", params: ["refreshToken": false]))
+            from: await request(method: "account/read", params: ["refreshToken": home != nil]))
         let usage = try JSONDecoder().decode(ProfileUsageResponse.self,
             from: await request(method: "account/usage/read", params: [:]))
         let after = try JSONDecoder().decode(AccountReadResponse.self,

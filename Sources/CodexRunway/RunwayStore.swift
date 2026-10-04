@@ -31,6 +31,10 @@ final class RunwayStore: ObservableObject {
     private let loginSwitcher: CodexLoginSwitcher
     private let readLoginConfiguration: @MainActor () async throws -> CodexLoginConfiguration
     private let readSavedUsage: @MainActor (String, CodexLoginConfiguration) async throws -> ActiveCodexAccount
+    private let isCurrentAccount: @MainActor (CodexAccount) throws -> Bool
+    private let readSavedProfile: @MainActor (String, CodexLoginConfiguration) async throws -> ActiveAccountProfile
+    private let readSavedAnalytics: @MainActor (String, CodexLoginConfiguration, Bool, [AnalyticsThreadSummary], Date) async throws -> AnalyticsUpdate
+    private let readAnalyticsThreads: @MainActor (Date) async throws -> [AnalyticsThreadSummary]
     private let verifyLogin: @MainActor () async throws -> AccountReadResponse
 
     let displayPreferences: RunwayDisplayPreferences
@@ -61,6 +65,12 @@ final class RunwayStore: ObservableObject {
              try await CodexAppServerClient().verifyLogin()
          },
          readSavedUsage: (@MainActor (String, CodexLoginConfiguration) async throws -> ActiveCodexAccount)? = nil,
+         isCurrentAccount: (@MainActor (CodexAccount) throws -> Bool)? = nil,
+         readSavedProfile: (@MainActor (String, CodexLoginConfiguration) async throws -> ActiveAccountProfile)? = nil,
+         readSavedAnalytics: (@MainActor (String, CodexLoginConfiguration, Bool, [AnalyticsThreadSummary], Date) async throws -> AnalyticsUpdate)? = nil,
+         readAnalyticsThreads: @escaping @MainActor (Date) async throws -> [AnalyticsThreadSummary] = {
+             try await CodexAppServerClient().readAnalyticsThreads(since: $0)
+         },
          synchronizeSavedLogin: (@MainActor () throws -> Void)? = nil,
          closeDesktop: @escaping @MainActor () async throws -> Bool = { try await CodexDesktopLifecycle().close() },
          openDesktop: @escaping @MainActor () async throws -> Void = { try await CodexDesktopLifecycle().open() },
@@ -78,6 +88,23 @@ final class RunwayStore: ObservableObject {
         self.readLoginConfiguration = readLoginConfiguration
         self.verifyLogin = verifyLogin
         self.readSavedUsage = readSavedUsage ?? { try await loginSwitcher.readSavedUsage(id: $0, configuration: $1) }
+        self.isCurrentAccount = isCurrentAccount ?? { try loginSwitcher.isCurrentAccount(email: $0.email, accountID: $0.externalAccountID) }
+        self.readSavedProfile = readSavedProfile ?? { try await loginSwitcher.readSavedProfile(id: $0, configuration: $1) }
+        self.readAnalyticsThreads = readAnalyticsThreads
+        self.readSavedAnalytics = readSavedAnalytics ?? { id, configuration, initial, threads, now in
+            try await loginSwitcher.withSavedLogin(id: id, configuration: configuration) { home, configuration, profile in
+                // Let Codex validate and refresh this saved session before using
+                // its access token with the first-party Analytics endpoints.
+                let response = try await CodexAppServerClient().readActiveAccount(home: home, configuration: configuration)
+                guard response.identity.account?.type == "chatgpt",
+                      response.identity.account?.email?.lowercased() == profile.email,
+                      response.rateLimits.accountId == nil || response.rateLimits.accountId == profile.accountID else {
+                    throw CodexAppServerError.invalidResponse
+                }
+                return try await analyticsClient.fetch(accountID: profile.accountID, initial: initial,
+                    threads: threads, now: now, authFile: home.appendingPathComponent("auth.json"))
+            }
+        }
         self.closeDesktop = closeDesktop
         self.openDesktop = openDesktop
         self.desktopIsOpen = desktopIsOpen
@@ -363,7 +390,7 @@ final class RunwayStore: ObservableObject {
     /// discovered by stable account ID and email, never by their plan tier.
     @discardableResult
     func refreshActiveAccount(forceProfile: Bool = false, presentFailure: Bool = true) async -> Bool {
-        guard !isRefreshing, !isManagingLogin, !loginRecoveryPending, refreshingSavedAccountID == nil else { return false }
+        guard !loginActionsDisabled, !loginRecoveryPending else { return false }
         isRefreshing = true
         refreshError = nil
         defer { isRefreshing = false }
@@ -487,53 +514,130 @@ final class RunwayStore: ObservableObject {
         }
     }
 
-    func refreshAnalyticsForSignedInAccount() async {
-        guard let activeAccountID,
-              let account = accounts.first(where: { $0.id == activeAccountID }),
-              let externalAccountID = account.externalAccountID else { return }
-        await refreshAnalytics(accountID: activeAccountID, externalAccountID: externalAccountID, forceChats: true)
-    }
-
-    private func refreshAnalytics(accountID: UUID, externalAccountID: String, forceChats: Bool = false) async {
-        guard !isRefreshingAnalytics, !isManagingLogin, !loginRecoveryPending, refreshingSavedAccountID == nil else { return }
+    /// A nil selection means every enabled account, matching both account pickers.
+    func refreshAnalytics(accountID: UUID? = nil) async {
+        guard !loginActionsDisabled, !loginRecoveryPending else { return }
         isRefreshingAnalytics = true
         analyticsRefreshError = nil
         defer { isRefreshingAnalytics = false }
-        let now = self.now()
-        var archive = analyticsByAccount[accountID] ?? AnalyticsArchive(accountID: externalAccountID)
-        guard archive.accountID == externalAccountID else {
-            analyticsRefreshError = "Saved Analytics belong to a different account."
-            return
-        }
-        let backfill = archive.lastBackfillAt.map { now.timeIntervalSince($0) >= 7 * 86_400 } ?? true
-        do {
-            let fetchChats = forceChats || (archive.chatsFetchedAt.map { now.timeIntervalSince($0) >= 15 * 60 } ?? true)
-            var threadError: String?
-            var threads: [AnalyticsThreadSummary] = []
-            if fetchChats {
-                do {
-                    threads = try await CodexAppServerClient().readAnalyticsThreads(
-                        since: (backfill || archive.chatsFetchedAt == nil)
-                            ? HistoryRetention.cutoff(now: now) : now.addingTimeInterval(-30 * 86_400))
-                } catch { threadError = "Top chats: \(error.localizedDescription)" }
+        reloadSavedLogins()
+        guard !loginRecoveryPending else { analyticsRefreshError = LoginSwitchError.recoveryRequired.localizedDescription; return }
+        let targets = refreshTargets(accountID: accountID)
+        guard !targets.isEmpty else { analyticsRefreshError = "No accounts selected for sync."; return }
+        var errors: [String] = []
+        for account in targets {
+            do {
+                try Task.checkCancellation()
+                let warnings = try await collectAnalytics(account: account, forceChats: true, useSavedLogin: true)
+                errors.append(contentsOf: warnings.map { "\(account.name): \($0)" })
+            } catch {
+                errors.append("\(account.name): \(error.localizedDescription)")
+                if error is CancellationError { break }
             }
-            var update = try await analyticsClient.fetch(accountID: externalAccountID, initial: backfill,
-                                                         threads: threads, now: now)
-            if let threadError { update.errors.append(threadError) }
-            guard accounts.contains(where: { $0.id == accountID && $0.externalAccountID == externalAccountID }) else { return }
-            archive.apply(update, now: now, wasBackfill: backfill)
-            try analyticsArchiveStore.save(archive, accountID: accountID)
-            analyticsByAccount[accountID] = archive
-            if !update.errors.isEmpty { analyticsRefreshError = update.errors.joined(separator: " · ") }
-        } catch {
-            analyticsRefreshError = error.localizedDescription
         }
+        analyticsRefreshError = errors.isEmpty ? nil : errors.joined(separator: " · ")
+        reloadSavedLogins()
     }
 
-    func refreshProfile() async {
-        // Re-resolve the signed-in identity before a manual request; a selected
-        // saved profile is never used as an authentication target.
-        await refreshActiveAccount(forceProfile: true)
+    private func refreshAnalytics(accountID: UUID, externalAccountID: String, forceChats: Bool = false) async {
+        guard !loginActionsDisabled, !loginRecoveryPending,
+              let account = accounts.first(where: { $0.id == accountID && $0.externalAccountID == externalAccountID }) else { return }
+        isRefreshingAnalytics = true
+        analyticsRefreshError = nil
+        defer { isRefreshingAnalytics = false }
+        do {
+            let warnings = try await collectAnalytics(account: account, forceChats: forceChats, useSavedLogin: false)
+            analyticsRefreshError = warnings.isEmpty ? nil : warnings.joined(separator: " · ")
+        } catch { analyticsRefreshError = error.localizedDescription }
+    }
+
+    private func collectAnalytics(account: CodexAccount, forceChats: Bool, useSavedLogin: Bool) async throws -> [String] {
+        let current = try isCurrentAccount(account)
+        let login = current ? nil : savedLogin(for: account)
+        guard current || useSavedLogin else { throw AnalyticsClientError.accountChanged }
+        guard current || login != nil else { throw CodexAppServerError.server("Save this account’s login in Settings before syncing.") }
+        guard let externalAccountID = account.externalAccountID ?? login?.accountID else { throw AnalyticsClientError.noChatGPTSession }
+        let now = self.now()
+        var archive = analyticsByAccount[account.id] ?? AnalyticsArchive(accountID: externalAccountID)
+        guard archive.accountID == externalAccountID else { throw AnalyticsClientError.accountChanged }
+        let backfill = archive.lastBackfillAt.map { now.timeIntervalSince($0) >= 7 * 86_400 } ?? true
+        let fetchChats = forceChats || (archive.chatsFetchedAt.map { now.timeIntervalSince($0) >= 15 * 60 } ?? true)
+        var threadError: String?
+        var threads: [AnalyticsThreadSummary] = []
+        if fetchChats {
+            do {
+                // Task metadata stays in the real local home. The backend
+                // filters usage for the account whose credentials are supplied.
+                threads = try await readAnalyticsThreads((backfill || archive.chatsFetchedAt == nil)
+                    ? HistoryRetention.cutoff(now: now) : now.addingTimeInterval(-30 * 86_400))
+            } catch { threadError = "Top chats: \(error.localizedDescription)" }
+        }
+        var update: AnalyticsUpdate
+        if current {
+            update = try await analyticsClient.fetch(accountID: externalAccountID, initial: backfill, threads: threads, now: now)
+            do { try synchronizeSavedLogin() }
+            catch { update.errors.append("Saved login: \(error.localizedDescription)") }
+        } else if let login {
+            let configuration = try await readLoginConfiguration()
+            update = try await readSavedAnalytics(login.id, configuration, backfill, threads, now)
+        } else { throw LoginSwitchError.missingSavedLogin }
+        if let threadError { update.errors.append(threadError) }
+        guard let index = accounts.firstIndex(where: {
+            $0.id == account.id && normalizedEmail($0.email) == normalizedEmail(account.email)
+                && ($0.externalAccountID == nil || $0.externalAccountID == externalAccountID)
+        }) else { throw AnalyticsClientError.accountChanged }
+        archive.apply(update, now: now, wasBackfill: backfill)
+        try analyticsArchiveStore.save(archive, accountID: account.id)
+        analyticsByAccount[account.id] = archive
+        accounts[index].externalAccountID = externalAccountID
+        save()
+        return update.errors
+    }
+
+    func refreshProfile(accountID: UUID? = nil) async {
+        guard !loginActionsDisabled, !loginRecoveryPending else { return }
+        isRefreshingProfile = true
+        profileRefreshError = nil
+        defer { isRefreshingProfile = false }
+        reloadSavedLogins()
+        guard !loginRecoveryPending else { profileRefreshError = LoginSwitchError.recoveryRequired.localizedDescription; return }
+        let targets = refreshTargets(accountID: accountID)
+        guard !targets.isEmpty else { profileRefreshError = "No accounts selected for refresh."; return }
+        var errors: [String] = []
+        for account in targets {
+            do {
+                try Task.checkCancellation()
+                let response: ActiveAccountProfile
+                if try isCurrentAccount(account) {
+                    response = try await readProfile()
+                    guard try isCurrentAccount(account) else { throw AnalyticsClientError.accountChanged }
+                    do { try synchronizeSavedLogin() }
+                    catch { errors.append("\(account.name): Saved login: \(error.localizedDescription)") }
+                } else {
+                    guard let login = savedLogin(for: account) else { throw CodexAppServerError.server("Save this account’s login in Settings before refreshing.") }
+                    let configuration = try await readLoginConfiguration()
+                    response = try await readSavedProfile(login.id, configuration)
+                }
+                guard response.identity.account?.type == "chatgpt",
+                      normalizedEmail(response.identity.account?.email) == normalizedEmail(account.email),
+                      let index = accounts.firstIndex(where: {
+                          $0.id == account.id && normalizedEmail($0.email) == normalizedEmail(account.email)
+                              && $0.externalAccountID == account.externalAccountID
+                      }) else { throw CodexAppServerError.invalidResponse }
+                accounts[index].profile = AccountProfile.merging(response.usage, into: accounts[index].profile, now: now())
+                save()
+            } catch {
+                errors.append("\(account.name): \(error.localizedDescription)")
+                if error is CancellationError { break }
+            }
+        }
+        profileRefreshError = errors.isEmpty ? nil : errors.joined(separator: " · ")
+        reloadSavedLogins()
+    }
+
+    private func refreshTargets(accountID: UUID?) -> [CodexAccount] {
+        if let accountID { return accounts.filter { $0.id == accountID } }
+        return dashboardAccounts
     }
 
     private func refreshProfileIfNeeded(accountID: UUID, force: Bool) async {

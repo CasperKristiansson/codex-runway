@@ -1,6 +1,21 @@
 import Foundation
 
 @MainActor
+private final class EmptyLoginStore: SavedLoginStore {
+    func profiles() throws -> [SavedLoginProfile] { [] }
+    func save(_ login: SavedCodexLogin) throws {}
+    func load(id: String) throws -> SavedCodexLogin { throw LoginSwitchError.missingSavedLogin }
+    func remove(id: String) throws {}
+}
+@MainActor
+private final class EmptyRecoveryStore: LoginRecoveryStore {
+    func load() throws -> LoginRecoveryRecord? { nil }
+    func save(_ record: LoginRecoveryRecord) throws {}
+    func clear() throws {}
+}
+
+
+@MainActor
 private final class RefreshFixture {
     var calls = 0
     var inFlight = 0
@@ -44,7 +59,7 @@ struct StatusChecks {
         let journalDirectory = FileManager.default.temporaryDirectory.appendingPathComponent("runway-journal-\(UUID().uuidString)")
         defer { try? FileManager.default.removeItem(at: journalDirectory) }
         let fixture = RefreshFixture()
-        let store = RunwayStore(defaults: defaults, forecastJournal: ForecastJournal(directory: journalDirectory), analyticsEnabled: false, synchronizeSavedLogin: {}, now: { fixture.time }, readProfile: {
+        let store = RunwayStore(defaults: defaults, forecastJournal: ForecastJournal(directory: journalDirectory), analyticsEnabled: false, loginSwitcher: CodexLoginSwitcher(vault: EmptyLoginStore(), recovery: EmptyRecoveryStore()), isCurrentAccount: { $0.email == fixture.email }, synchronizeSavedLogin: {}, now: { fixture.time }, readProfile: {
             fixture.profileCalls += 1
             if fixture.profileShouldFail { throw CodexAppServerError.invalidResponse }
             return ActiveAccountProfile(

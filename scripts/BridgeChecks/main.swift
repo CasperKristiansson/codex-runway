@@ -123,7 +123,7 @@ struct BridgeChecks {
         let switcher = CodexLoginSwitcher(home: root, vault: vault, recovery: recovery, assertClosed: { try fixture.assertClosed() })
         let secondLogin = try switcher.saveCurrent(configuration: config)
         try write(outgoing); _ = try switcher.saveCurrent(configuration: config)
-        var quotaCalls = 0, savedCalls = 0
+        var quotaCalls = 0, savedCalls = 0, savedProfileCalls = 0, savedAnalyticsCalls = 0
         let flags = Flags()
         var quotaGate: CheckedContinuation<Void, Never>?
         var verifyGate: CheckedContinuation<Void, Never>?
@@ -135,7 +135,13 @@ struct BridgeChecks {
             readLoginConfiguration: { config }, verifyLogin: {
                 await withCheckedContinuation { verifyGate = $0 }
                 return response(second.email)
-            }, readSavedUsage: { _, _ in savedCalls += 1; return usage(second.email, id: "two") }, synchronizeSavedLogin: {}, closeDesktop: {
+            }, readSavedUsage: { _, _ in savedCalls += 1; return usage(second.email, id: "two") }, readSavedProfile: { id, _ in
+                precondition(id == secondLogin.id); savedProfileCalls += 1
+                return ActiveAccountProfile(identity: response(second.email), usage: ProfileUsageResponse(summary: second.profile!.summary, dailyUsageBuckets: second.profile!.dailyUsageBuckets))
+            }, readSavedAnalytics: { id, _, _, _, _ in
+                precondition(id == secondLogin.id); savedAnalyticsCalls += 1
+                var update = AnalyticsUpdate(); update.messages = []; return update
+            }, readAnalyticsThreads: { _ in [] }, synchronizeSavedLogin: {}, closeDesktop: {
                 lifecycle.closes += 1; lifecycle.isOpen = false; fixture.open = false; return true
             }, openDesktop: { lifecycle.opens += 1; lifecycle.isOpen = true }, desktopIsOpen: { lifecycle.isOpen }, now: { time }, readProfile: {
                 ActiveAccountProfile(identity: response(first.email), usage: ProfileUsageResponse(summary: first.profile!.summary, dailyUsageBuckets: first.profile!.dailyUsageBuckets))
@@ -198,6 +204,21 @@ struct BridgeChecks {
         try check((reconciled["preferences"] as! [String: Any])["percent"] as? Bool == true)
         let rows = reconciled["accounts"] as! [[String: Any]]
         try check(rows.first { $0["id"] as? String == second.id.uuidString }?["enabled"] as? Bool == false)
+        // Both manual buttons route the selected account even with no active
+        // marker. All excludes disabled rows; explicit selections include them.
+        try check(store.activeAccountID == nil)
+        for action in ["refreshProfile", "refreshAnalytics"] {
+            try check(try reply(wire("command", ["action": action, "accountID": UUID().uuidString, "requestID": UUID().uuidString]))["error"] != nil)
+        }
+        _ = try reply(wire("command", ["action": "refreshProfile", "requestID": UUID().uuidString]))
+        for _ in 0..<1000 { if hub.operations.last?.state != "running" { break }; await Task.yield() }
+        try check(savedProfileCalls == 0 && hub.operations.last?.state == "completed", "All must skip disabled accounts")
+        _ = try reply(wire("command", ["action": "refreshProfile", "accountID": second.id.uuidString, "requestID": UUID().uuidString]))
+        for _ in 0..<1000 { if hub.operations.last?.state != "running" { break }; await Task.yield() }
+        try check(savedProfileCalls == 1 && hub.operations.last?.state == "completed")
+        _ = try reply(wire("command", ["action": "refreshAnalytics", "accountID": second.id.uuidString, "requestID": UUID().uuidString]))
+        for _ in 0..<1000 { if hub.operations.last?.state != "running" { break }; await Task.yield() }
+        try check(savedAnalyticsCalls == 1 && hub.operations.last?.state == "completed")
         let stale = HubSnapshot.base(store: store, now: time.addingTimeInterval(8 * 86400))
         let staleRows = stale["accounts"] as! [[String: Any]]
         try check(staleRows.first?["assumedReset"] as? Bool == true && staleRows.first?["resetAt"] is NSNull)

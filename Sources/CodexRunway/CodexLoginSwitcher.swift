@@ -50,12 +50,46 @@ final class CodexLoginSwitcher {
         return try CodexLoginCache(data).matches(profile, home: authFile.home)
     }
 
-    /// Inactive usage refresh never replaces the desktop credential file. Its
-    /// per-operation home and token rotations belong solely to this saved login.
+    func isCurrentAccount(email: String, accountID: String?) throws -> Bool {
+        guard let data = try authFile.read() else { return false }
+        let cache = try CodexLoginCache(data)
+        return cache.email == email.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            && (accountID == nil || cache.accountID == accountID)
+    }
+
     func readSavedUsage(id: String, configuration: CodexLoginConfiguration,
                         read: @MainActor (URL, CodexLoginConfiguration) async throws -> ActiveCodexAccount = {
                             try await CodexAppServerClient().readActiveAccount(home: $0, configuration: $1)
                         }) async throws -> ActiveCodexAccount {
+        try await withSavedLogin(id: id, configuration: configuration) { home, configuration, profile in
+            let response = try await read(home, configuration)
+            guard response.identity.account?.type == "chatgpt",
+                  response.identity.account?.email?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() == profile.email,
+                  response.rateLimits.accountId == nil || response.rateLimits.accountId == profile.accountID else {
+                throw CodexAppServerError.invalidResponse
+            }
+            return response
+        }
+    }
+
+    func readSavedProfile(id: String, configuration: CodexLoginConfiguration,
+                          read: @MainActor (URL, CodexLoginConfiguration) async throws -> ActiveAccountProfile = {
+                              try await CodexAppServerClient().readActiveProfile(home: $0, configuration: $1)
+                          }) async throws -> ActiveAccountProfile {
+        try await withSavedLogin(id: id, configuration: configuration) { home, configuration, profile in
+            let response = try await read(home, configuration)
+            guard response.identity.account?.type == "chatgpt",
+                  response.identity.account?.email?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() == profile.email else {
+                throw CodexAppServerError.invalidResponse
+            }
+            return response
+        }
+    }
+
+    /// Every manual saved-account request shares the same isolated home, lock,
+    /// cleanup and token-rotation handling. The desktop login is never replaced.
+    func withSavedLogin<T>(id: String, configuration: CodexLoginConfiguration,
+                           read: @MainActor (URL, CodexLoginConfiguration, SavedLoginProfile) async throws -> T) async throws -> T {
         let lock = try authFile.acquireOperationLock()
         defer { try? lock.close() }
         guard try !hasPendingRecovery() else { throw LoginSwitchError.recoveryRequired }
@@ -88,21 +122,16 @@ final class CodexLoginSwitcher {
             try vault.save(SavedCodexLogin(profile: updated.profile(home: authFile.home, now: now()), credentials: latest))
         }
 
-        let response: ActiveCodexAccount
+        let response: T
         do {
             try Task.checkCancellation()
-            response = try await read(home, configuration)
+            response = try await read(home, configuration, login.profile)
         } catch {
             // Authentication can rotate tokens even when fetching usage fails.
             try retainRotations()
             throw error
         }
         try retainRotations()
-        guard response.identity.account?.type == "chatgpt",
-              response.identity.account?.email?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() == cache.email,
-              response.rateLimits.accountId == nil || response.rateLimits.accountId == cache.accountID else {
-            throw CodexAppServerError.invalidResponse
-        }
         return response
     }
     func forget(id: String) throws {
