@@ -65,8 +65,8 @@ final class AnalyticsClient {
         self.decoder = decoder
     }
 
-    func fetch(accountID: String, initial: Bool, threads: [AnalyticsThreadSummary] = [], now: Date = .now) async throws -> AnalyticsUpdate {
-        let auth = try credentials()
+    func fetch(accountID: String, initial: Bool, threads: [AnalyticsThreadSummary] = [], now: Date = .now, authFile: URL? = nil) async throws -> AnalyticsUpdate {
+        let auth = try credentials(authFile: authFile)
         guard auth.accountId == accountID else { throw AnalyticsClientError.accountChanged }
         let calendar = ProfileCalendar.calendar
         let today = calendar.startOfDay(for: now)
@@ -124,12 +124,12 @@ final class AnalyticsClient {
         }
 
         guard update.succeeded else { throw AnalyticsClientError.invalidResponse }
-        guard try credentials().accountId == accountID else { throw AnalyticsClientError.accountChanged }
+        guard try credentials(authFile: authFile).accountId == accountID else { throw AnalyticsClientError.accountChanged }
         return update
     }
 
-    private func credentials() throws -> AuthFile.Tokens {
-        guard let file = try? Data(contentsOf: authFile),
+    private func credentials(authFile: URL? = nil) throws -> AuthFile.Tokens {
+        guard let file = try? Data(contentsOf: authFile ?? self.authFile),
               let tokens = try? decoder.decode(AuthFile.self, from: file).tokens,
               !tokens.accessToken.isEmpty, !tokens.accountId.isEmpty
         else { throw AnalyticsClientError.noChatGPTSession }

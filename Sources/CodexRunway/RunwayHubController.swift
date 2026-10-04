@@ -148,7 +148,7 @@ final class RunwayHubController {
         if ["switch", "forget"].contains(action) {
             guard let id = request.loginID, store.savedLogins.contains(where: { $0.id == id }) else { throw HubError.missing }
         }
-        if ["enable", "move", "refreshSaved"].contains(action) {
+        if ["enable", "move", "refreshSaved"].contains(action) || (["refreshProfile", "refreshAnalytics"].contains(action) && request.accountID != nil) {
             guard let id = request.accountID, let account = store.accounts.first(where: { $0.id == id }) else { throw HubError.missing }
             if action == "refreshSaved", !store.canRefreshUsage(for: account) { throw HubError.busy }
         }
@@ -161,7 +161,6 @@ final class RunwayHubController {
         if action == "backupEnabled", request.enabled == nil || backups.destinationPath == nil { throw HubError.invalid }
         if action == "backupRetention", !(1...365).contains(request.keepDailyDays ?? 0) { throw HubError.invalid }
         if action == "backupNow", backups.destinationPath == nil || backups.isWorking { throw HubError.busy }
-        if action == "refreshAnalytics", store.activeAccountID == nil { throw HubError.missing }
         if action == "recover", !store.loginRecoveryPending { throw HubError.invalid }
         let operation = HubOperation(id: UUID(), requestID: requestID, signature: signature, action: action,
             target: request.loginID ?? request.accountID?.uuidString, startedAt: .now, state: "running",
@@ -199,8 +198,8 @@ final class RunwayHubController {
         switch request.action {
         case "refresh": if !(await store.refreshActiveAccount()) { return "failed" }
         case "refreshSaved": if let id = request.accountID { await store.refreshUsage(accountID: id) }
-        case "refreshProfile": await store.refreshProfile()
-        case "refreshAnalytics": await store.refreshAnalyticsForSignedInAccount()
+        case "refreshProfile": await store.refreshProfile(accountID: request.accountID)
+        case "refreshAnalytics": await store.refreshAnalytics(accountID: request.accountID)
         case "save": await store.saveCurrentLogin()
         case "add": await store.addLogin()
         case "switch": if let id = request.loginID { await store.switchLogin(id: id) }
@@ -231,7 +230,7 @@ final class RunwayHubController {
     private func failure(for request: HubRequest) -> Bool {
         switch request.action {
         case "refresh": store.refreshError != nil
-        case "refreshProfile": store.profileRefreshError != nil || store.refreshError != nil
+        case "refreshProfile": store.profileRefreshError != nil
         case "refreshSaved": request.accountID.map { store.savedUsageErrors[$0] != nil } ?? true
         case "refreshAnalytics": store.analyticsRefreshError != nil
         case "add", "save", "switch", "recover", "forget", "reloadLogins": store.loginStatusIsError || store.loginRecoveryPending

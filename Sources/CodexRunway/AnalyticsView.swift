@@ -96,11 +96,12 @@ struct AnalyticsView: View {
                 }
                 Spacer()
                 Button {
-                    Task { await store.refreshAnalyticsForSignedInAccount() }
+                    Task { await store.refreshAnalytics(accountID: selection) }
                 } label: {
                     Label(store.isRefreshingAnalytics ? "Syncing…" : "Sync now", systemImage: "arrow.clockwise")
                 }
-                .disabled(store.isRefreshingAnalytics || store.activeAccountID == nil)
+                .disabled(store.loginActionsDisabled || store.loginRecoveryPending || accounts.isEmpty)
+                .help("Sync every selected account. Save inactive accounts’ logins in Settings first.")
             }
             HStack {
                 Picker("Account", selection: $selection) {

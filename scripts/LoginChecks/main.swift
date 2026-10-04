@@ -256,7 +256,7 @@ struct LoginChecks {
                 let refreshed = await store.refreshActiveAccount()
                 precondition(!refreshed && readCalls == 0)
                 await store.refreshProfile()
-                await store.refreshAnalyticsForSignedInAccount()
+                await store.refreshAnalytics()
                 try await Task.sleep(for: .milliseconds(10))
                 return config
             }, verifyLogin: { response("second@example.com") }, readSavedUsage: savedUsage, closeDesktop: { fixture.open = false; return false }, openDesktop: {}, readAccount: {
