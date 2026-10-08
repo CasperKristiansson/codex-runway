@@ -200,7 +200,7 @@ private struct AccountSettingsRow: View {
                 .buttonStyle(AccountActionButtonStyle(tint: account.isEnabled ? Color(red: 0.02, green: 0.40, blue: 0.35) : .secondary, showsState: true))
                 .accessibilityLabel("\(account.isEnabled ? "Deactivate" : "Activate") \(account.name)")
                 .accessibilityValue(account.isEnabled ? "Active" : "Inactive")
-                .help(account.isEnabled ? "Deactivate this account without deleting its history" : "Activate this account in the dashboard and graph")
+                .help(account.isEnabled ? "Exclude from current capacity; saved History and Analytics stay included in All accounts" : "Activate this account in the dashboard and graph")
             }
             .fixedSize()
         }

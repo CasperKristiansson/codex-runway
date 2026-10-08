@@ -50,7 +50,7 @@ struct AnalyticsView: View {
     ]
 
     private var selectedAccount: CodexAccount? { store.accounts.first { $0.id == selection } }
-    private var accounts: [CodexAccount] { selectedAccount.map { [$0] } ?? store.dashboardAccounts }
+    private var accounts: [CodexAccount] { store.historyAccounts(accountID: selection) }
     private var saved: [(CodexAccount, AnalyticsArchive)] {
         accounts.compactMap { account in store.analyticsByAccount[account.id].map { (account, $0) } }
     }
@@ -98,14 +98,14 @@ struct AnalyticsView: View {
                 Button {
                     Task { await store.refreshAnalytics(accountID: selection) }
                 } label: {
-                    Label(store.isRefreshingAnalytics ? "Syncing…" : "Sync now", systemImage: "arrow.clockwise")
+                    Label(store.isRefreshingAnalytics ? "Syncing…" : selection == nil ? "Sync active accounts" : "Sync now", systemImage: "arrow.clockwise")
                 }
-                .disabled(store.loginActionsDisabled || store.loginRecoveryPending || accounts.isEmpty)
-                .help("Sync every selected account. Save inactive accounts’ logins in Settings first.")
+                .disabled(store.loginActionsDisabled || store.loginRecoveryPending || (selection == nil ? store.dashboardAccounts.isEmpty : accounts.isEmpty))
+                .help("All accounts shows every saved archive; sync updates active accounts only. Select an inactive account to sync it individually with a saved login.")
             }
             HStack {
                 Picker("Account", selection: $selection) {
-                    Text("All active accounts").tag(nil as UUID?)
+                    Text("All accounts").tag(nil as UUID?)
                     ForEach(store.accounts) { account in
                         Text(account.name + (account.isEnabled ? "" : " · Inactive")).tag(Optional(account.id))
                     }
@@ -119,7 +119,7 @@ struct AnalyticsView: View {
                 }
             }
             if selectedAccount == nil && saved.count < accounts.count {
-                Text("\(saved.count) of \(accounts.count) active accounts have Analytics saved so far.")
+                Text("\(saved.count) of \(accounts.count) accounts have Analytics saved so far.")
                     .font(.caption).foregroundStyle(.orange)
             }
             if let error = store.analyticsRefreshError {

@@ -97,7 +97,7 @@ final class RunwayHubController {
         if let id = request.accountID {
             guard let account = store.accounts.first(where: { $0.id == id }) else { throw HubError.missing }
             selected = [account]
-        } else { selected = store.dashboardAccounts }
+        } else { selected = store.historyAccounts() }
         if overviewCache == nil || now.timeIntervalSince(overviewCache!.at) >= 60 || now < overviewCache!.at {
             overviewCache = (now, HubSnapshot.overview(store: store, now: now))
         }

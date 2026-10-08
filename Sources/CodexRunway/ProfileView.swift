@@ -11,7 +11,7 @@ struct ProfileView: View {
     private var mode: ProfileHeatmap.Mode { state.mode }
 
     private var selectedAccount: CodexAccount? { store.accounts.first { $0.id == selection } }
-    private var included: [CodexAccount] { selectedAccount.map { [$0] } ?? store.dashboardAccounts }
+    private var included: [CodexAccount] { store.historyAccounts(accountID: selection) }
     private var profile: AccountProfile? {
         if let selectedAccount { return selectedAccount.profile }
         return AccountProfile.combined(included.compactMap(\.profile), now: .now)
@@ -22,7 +22,7 @@ struct ProfileView: View {
             VStack(spacing: 0) {
                 HStack {
                     Picker("Account", selection: $selection) {
-                        Text("All active accounts").tag(nil as UUID?)
+                        Text("All accounts").tag(nil as UUID?)
                         ForEach(store.accounts) { account in
                             Text(account.name + (account.isEnabled ? "" : " · Inactive")).tag(Optional(account.id))
                         }
@@ -39,10 +39,10 @@ struct ProfileView: View {
                     Button {
                         Task { await store.refreshProfile(accountID: selection) }
                     } label: {
-                        Label(store.isRefreshingProfile ? "Refreshing…" : "Refresh profile", systemImage: "arrow.clockwise")
+                        Label(store.isRefreshingProfile ? "Refreshing…" : selection == nil ? "Refresh active profiles" : "Refresh profile", systemImage: "arrow.clockwise")
                     }
-                    .disabled(store.loginActionsDisabled || store.loginRecoveryPending || included.isEmpty)
-                    .help("Refresh every selected account, even if its profile is less than 6h old. Save inactive accounts’ logins in Settings first.")
+                    .disabled(store.loginActionsDisabled || store.loginRecoveryPending || (selection == nil ? store.dashboardAccounts.isEmpty : included.isEmpty))
+                    .help("All accounts shows every saved profile; refresh updates active accounts only. Select an inactive account to refresh it individually with a saved login.")
                 }
                 .padding(.bottom, 22)
 
@@ -55,7 +55,7 @@ struct ProfileView: View {
                     }
                 }
                 .frame(width: 76, height: 76)
-                Text(selectedAccount?.name ?? "All active accounts")
+                Text(selectedAccount?.name ?? "All accounts")
                     .font(.system(size: 23)).padding(.top, 16)
                 HStack(spacing: 8) {
                     Text(selectedAccount?.displayEmail ?? "\(included.filter { $0.profile != nil }.count)/\(included.count) profiles saved")

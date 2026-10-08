@@ -204,6 +204,16 @@ struct BridgeChecks {
         try check((reconciled["preferences"] as! [String: Any])["percent"] as? Bool == true)
         let rows = reconciled["accounts"] as! [[String: Any]]
         try check(rows.first { $0["id"] as? String == second.id.uuidString }?["enabled"] as? Bool == false)
+        // History and Analytics include disabled accounts even though current
+        // capacity excludes them. The snapshot count must describe all records.
+        let retiredHistory = try reply(wire("snapshot", ["section": "history"]))["history"] as! [String: Any]
+        try check(retiredHistory["accountCount"] as? Int == 2 && retiredHistory["savedCount"] as? Int == 2)
+        try check((retiredHistory["stats"] as! [String: Any])["Lifetime tokens"] as? String == (history["stats"] as! [String: Any])["Lifetime tokens"] as? String)
+        let retiredAnalytics = try reply(wire("snapshot", ["section": "analytics"]))["analytics"] as! [String: Any]
+        try check(retiredAnalytics["accountCount"] as? Int == 2 && retiredAnalytics["savedCount"] as? Int == 2)
+        let retiredRows = retiredAnalytics["sources"] as! [[String: Any]]
+        try check(retiredRows.count == 2)
+        try check(CapacityForecast.report(accounts: store.accounts, now: time).total == first.capacityUnits)
         // Both manual buttons route the selected account even with no active
         // marker. All excludes disabled rows; explicit selections include them.
         try check(store.activeAccountID == nil)

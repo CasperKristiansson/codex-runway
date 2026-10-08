@@ -181,10 +181,30 @@ struct SelectionChecks {
         try check(try auth.read() == currentCredentials)
         precondition(store.activeAccountID == activeID && store.accounts.map(\.snapshots) == quotas)
         precondition(isolatedHomes.allSatisfy { !fm.fileExists(atPath: $0.path) })
+        // Retiring a downgraded account and removing its login must leave its
+        // historical contribution available, including after app relaunch.
+        var retired = store.accounts[4]
+        retired.planName = "ChatGPT free"
+        store.update(retired)
+        let retainedAccounts = store.accounts
+        let retainedArchive = try archiveEncoder.encode(store.analyticsByAccount[retired.id])
+        let retainedLifetime = AccountProfile.combined(store.historyAccounts().compactMap(\.profile), now: now)?.summary.lifetimeTokens
+        store.forgetLogin(id: profiles[retired.id]!.id)
+        precondition(store.savedLogin(for: retired) == nil && store.accounts == retainedAccounts)
+        try check(archiveEncoder.encode(store.analyticsByAccount[retired.id]) == retainedArchive)
+        precondition(store.historyAccounts().count == 5 && store.dashboardAccounts.count == 4)
+        precondition(store.historyAccounts().compactMap(\.profile).count == 3, "Missing profiles stay in the coverage denominator")
+        precondition(store.historyAccounts(accountID: retired.id).first?.profile != nil)
+        let reopened = RunwayStore(defaults: defaults, forecastJournal: ForecastJournal(directory: root.appendingPathComponent("forecasts")),
+            analyticsArchiveStore: archives, analyticsEnabled: false, loginSwitcher: switcher)
+        precondition(reopened.historyAccounts() == retainedAccounts && reopened.dashboardAccounts.count == 4)
+        precondition(AccountProfile.combined(reopened.historyAccounts().compactMap(\.profile), now: now)?.summary.lifetimeTokens == retainedLifetime)
+        try check(archiveEncoder.encode(reopened.analyticsByAccount[retired.id]) == retainedArchive)
         profileCalls = []; analyticsCalls = []
         for row in rows { store.setAccountEnabled(id: row.id, enabled: false) }
         await store.refreshProfile(); await store.refreshAnalytics()
         precondition(profileCalls.isEmpty && analyticsCalls.isEmpty && store.profileRefreshError != nil && store.analyticsRefreshError != nil)
+        precondition(store.historyAccounts().count == 5 && store.historyAccounts().compactMap(\.profile).count == 3)
         print("Selection, partial failure, archive preservation, isolated credentials and refresh exclusion checks passed")
     }
 }

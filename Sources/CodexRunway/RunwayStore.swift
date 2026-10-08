@@ -40,6 +40,13 @@ final class RunwayStore: ObservableObject {
     let displayPreferences: RunwayDisplayPreferences
     private let defaultsKey = "codex-runway.accounts.v1"
     var dashboardAccounts: [CodexAccount] { accounts.filter(\.isEnabled) }
+
+    /// Historical coverage is independent of dashboard eligibility and saved
+    /// credentials. Deactivation and forgetting a login retain these records.
+    func historyAccounts(accountID: UUID? = nil) -> [CodexAccount] {
+        guard let accountID else { return accounts }
+        return accounts.filter { $0.id == accountID }
+    }
     private var refreshTimer: Timer?
     private var wakeObserver: NSObjectProtocol?
     private let defaults: UserDefaults
