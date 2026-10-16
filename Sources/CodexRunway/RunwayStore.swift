@@ -719,6 +719,8 @@ final class RunwayStore: ObservableObject {
 
     private static func displayPlanName(_ backendPlanType: String?) -> String {
         switch backendPlanType?.lowercased() {
+        case "promax":
+            return "Pro Max 25×"
         case "pro":
             return "Pro 20×"
         case "prolite":

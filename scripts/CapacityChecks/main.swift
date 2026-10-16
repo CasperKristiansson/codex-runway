@@ -66,6 +66,15 @@ struct CapacityChecks {
         let report = CapacityForecast.report(accounts: accounts, now: now)
         close(report.total, 9)
         close(report.remaining, 5)
+        for label in ["Pro Max 25×", "Pro 25x", "ChatGPT promax", "ChatGPT Pro Max"] {
+            let proMax = account("Max", plan: label, used: 40, resetHours: 8)
+            close(proMax.capacityUnits!, 5)
+            let combined = CapacityForecast.report(accounts: accounts + [proMax], now: now)
+            close(combined.total, 14)
+            close(combined.remaining, 8)
+        }
+        close(CapacityForecast.percentage(forUnits: 5), 125)
+        precondition(account("Unknown", plan: "ChatGPT future", used: 0, resetHours: 8).capacityUnits == nil)
         var inactive = accounts[0]
         inactive.isEnabled = false
         inactive.planName = "Unsupported"

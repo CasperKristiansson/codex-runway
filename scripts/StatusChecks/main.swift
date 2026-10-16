@@ -21,6 +21,8 @@ private final class RefreshFixture {
     var inFlight = 0
     var maximumInFlight = 0
     var email = "first@example.com"
+    var planType: String? = "pro"
+    var limitPlanType = "pro"
     var shouldFail = false
     var profileCalls = 0
     var profileShouldFail = false
@@ -73,10 +75,10 @@ struct StatusChecks {
             try await Task.sleep(for: .milliseconds(20))
             if fixture.shouldFail { throw CodexAppServerError.invalidResponse }
             return ActiveCodexAccount(
-                identity: AccountReadResponse(account: ChatGPTAccount(type: "chatgpt", email: fixture.email, planType: "pro")),
+                identity: AccountReadResponse(account: ChatGPTAccount(type: "chatgpt", email: fixture.email, planType: fixture.planType)),
                 rateLimits: RateLimitsReadResponse(accountId: fixture.email, rateLimits: RateLimitSnapshot(
                     primary: LimitWindow(usedPercent: 42, resetsAt: Date.now.addingTimeInterval(3600).timeIntervalSince1970),
-                    planType: "pro"
+                    planType: fixture.limitPlanType
                 ), rateLimitResetCredits: ResetCredits(availableCount: 2))
             )
         }
@@ -94,6 +96,23 @@ struct StatusChecks {
         precondition(fixture.maximumInFlight == 1, "Refreshes must never overlap")
         precondition(store.accounts.count == 1 && store.accounts[0].latestSnapshot?.usedPercent == 42)
         precondition(fixture.profileCalls == 1, "15-minute checks must skip profiles younger than six hours")
+        let beforeUpgrade = store.accounts[0]
+        fixture.planType = "promax"
+        await store.refreshActiveAccount()
+        precondition(store.accounts[0].id == beforeUpgrade.id && store.accounts.count == 1)
+        precondition(store.accounts[0].planName == "Pro Max 25×" && store.accounts[0].capacityUnits == 5)
+        precondition(store.accounts[0].snapshots.last?.capacityUnits == 5)
+        precondition(Array(store.accounts[0].snapshots.dropLast()) == beforeUpgrade.snapshots,
+            "An upgrade must preserve historical capacity weights")
+        precondition(RunwayStore(defaults: defaults).accounts == store.accounts, "Pro Max must persist")
+        fixture.planType = nil
+        fixture.limitPlanType = "promax"
+        await store.refreshActiveAccount()
+        precondition(store.accounts[0].planName == "Pro Max 25×", "Rate-limit plan is the identity fallback")
+        fixture.planType = "pro"
+        fixture.limitPlanType = "pro"
+        await store.refreshActiveAccount()
+        precondition(store.accounts[0].capacityUnits == 4 && store.accounts[0].snapshots.last?.capacityUnits == 4)
         fixture.time = fixture.time.addingTimeInterval(6 * 3_600)
         await store.refreshActiveAccount()
         precondition(fixture.profileCalls == 2, "Due profiles refresh on the next check, without waiting for a new six-hour timer")

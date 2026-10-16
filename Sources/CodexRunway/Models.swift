@@ -106,6 +106,9 @@ struct CodexAccount: Codable, Identifiable, Equatable {
 
     var capacityUnits: Double? {
         let plan = planName.lowercased().replacingOccurrences(of: "×", with: "x")
+        // Check 25x before 5x: the former contains the latter. Also accept
+        // the fallback label saved by versions predating Pro Max support.
+        if plan.contains("25x") || plan.contains("promax") || plan.contains("pro max") { return 5 }
         if plan.contains("20x") { return 4 }
         if plan.contains("5x") { return 1 }
         return nil
