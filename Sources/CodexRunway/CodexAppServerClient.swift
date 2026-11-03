@@ -11,6 +11,88 @@ struct RateLimitsReadResponse: Decodable {
 struct ActiveCodexAccount {
     let identity: AccountReadResponse
     let rateLimits: RateLimitsReadResponse
+    var benefits = AccountBenefitsUpdate()
+}
+
+struct AccountBenefitsUpdate: Sendable {
+    var balance: CreditBalanceSnapshot?
+    var resets: BankedResetSnapshot?
+    var failed = false
+}
+
+/// Supplementary first-party reads. Failures never discard quota or cached balances.
+enum AccountBenefitsClient {
+    private struct Auth: Decodable {
+        struct Tokens: Decodable { let access_token: String; let account_id: String }
+        let tokens: Tokens
+    }
+    private struct Usage: Decodable {
+        struct Credits: Decodable { let balance: String?; let unlimited: Bool }
+        let credits: Credits?
+    }
+    private struct Resets: Decodable {
+        struct Credit: Decodable {
+            let status: String
+            let granted_at: String?
+            let expires_at: String?
+            let is_supported_by_plan: Bool?
+        }
+        let available_count: Int
+        let credits: [Credit]
+    }
+    static func parseDate(_ text: String?) -> Date? {
+        guard let text else { return nil }
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return formatter.date(from: text) ?? ISO8601DateFormatter().date(from: text)
+    }
+    static func balance(from data: Data, now: Date) throws -> CreditBalanceSnapshot {
+        guard let credits = try JSONDecoder().decode(Usage.self, from: data).credits,
+              credits.unlimited || credits.balance.flatMap(Double.init).map({ $0.isFinite }) == true else {
+            throw CodexAppServerError.invalidResponse
+        }
+        return CreditBalanceSnapshot(balance: credits.balance, unlimited: credits.unlimited, fetchedAt: now)
+    }
+    static func resets(from data: Data, now: Date) throws -> BankedResetSnapshot {
+        let response = try JSONDecoder().decode(Resets.self, from: data)
+        guard response.available_count >= 0, response.credits.count <= 512 else { throw CodexAppServerError.invalidResponse }
+        let resets = try response.credits.map { credit in
+            let granted = parseDate(credit.granted_at), expiry = parseDate(credit.expires_at)
+            guard (credit.granted_at == nil || granted != nil), (credit.expires_at == nil || expiry != nil) else {
+                throw CodexAppServerError.invalidResponse
+            }
+            return BankedResetDetail(status: credit.status, grantedAt: granted, expiresAt: expiry, supportedByPlan: credit.is_supported_by_plan)
+        }
+        return BankedResetSnapshot(availableCount: response.available_count, resets: resets, fetchedAt: now)
+    }
+    static func fetch(home: URL, accountID: String, session: URLSession? = nil) async -> AccountBenefitsUpdate {
+        let file = home.appendingPathComponent("auth.json")
+        guard let data = try? Data(contentsOf: file), let auth = try? JSONDecoder().decode(Auth.self, from: data),
+              auth.tokens.account_id == accountID else { return AccountBenefitsUpdate(failed: true) }
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.timeoutIntervalForRequest = 10
+        configuration.timeoutIntervalForResource = 15
+        let client = session ?? URLSession(configuration: configuration)
+        defer { if session == nil { client.invalidateAndCancel() } }
+        func get(_ path: String) async -> Data? {
+            var request = URLRequest(url: URL(string: "https://chatgpt.com/backend-api/wham/\(path)")!)
+            request.setValue("Bearer \(auth.tokens.access_token)", forHTTPHeaderField: "Authorization")
+            request.setValue(accountID, forHTTPHeaderField: "ChatGPT-Account-Id")
+            request.setValue("CodexRunway/1.0", forHTTPHeaderField: "User-Agent")
+            guard let (body, response) = try? await client.data(for: request),
+                  (response as? HTTPURLResponse)?.statusCode == 200, body.count <= 1_048_576 else { return nil }
+            return body
+        }
+        async let usage = get("usage")
+        async let resetCredits = get("rate-limit-reset-credits")
+        let (usageData, resetData) = await (usage, resetCredits)
+        guard let after = try? Data(contentsOf: file), let current = try? JSONDecoder().decode(Auth.self, from: after),
+              current.tokens.account_id == accountID else { return AccountBenefitsUpdate(failed: true) }
+        let now = Date.now
+        let balance = usageData.flatMap { try? balance(from: $0, now: now) }
+        let resets = resetData.flatMap { try? resets(from: $0, now: now) }
+        return AccountBenefitsUpdate(balance: balance, resets: resets, failed: balance == nil || resets == nil)
+    }
 }
 
 struct ActiveAccountProfile {
@@ -207,12 +289,18 @@ actor CodexAppServerClient {
         let accountData = try await request(method: "account/read", params: ["refreshToken": home != nil])
         let rateLimitData = try await request(method: "account/rateLimits/read", params: nil)
         let identity = try JSONDecoder().decode(AccountReadResponse.self, from: accountData)
+        let limits = try JSONDecoder().decode(RateLimitsReadResponse.self, from: rateLimitData)
+        let benefits: AccountBenefitsUpdate
+        if let accountID = limits.accountId {
+            benefits = await AccountBenefitsClient.fetch(home: home ?? CodexAuthFile.defaultHome, accountID: accountID)
+        } else { benefits = AccountBenefitsUpdate(failed: true) }
         let after = try JSONDecoder().decode(AccountReadResponse.self,
             from: await request(method: "account/read", params: ["refreshToken": false]))
         guard identity == after else { throw CodexAppServerError.server("Account changed during usage refresh. Try again.") }
         return ActiveCodexAccount(
             identity: identity,
-            rateLimits: try JSONDecoder().decode(RateLimitsReadResponse.self, from: rateLimitData)
+            rateLimits: limits,
+            benefits: benefits
         )
     }
 

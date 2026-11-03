@@ -499,6 +499,9 @@ final class RunwayStore: ObservableObject {
             accounts[index].email = email
         }
         accounts[index].planName = planName
+        if let balance = response.benefits.balance { accounts[index].creditBalance = balance }
+        if let resets = response.benefits.resets { accounts[index].bankedResetDetails = resets }
+        accounts[index].benefitsRefreshFailed = response.benefits.failed
         snapshot.capacityUnits = accounts[index].capacityUnits
         snapshot.windowDurationMins = response.rateLimits.rateLimits.primary.windowDurationMins
         snapshot.secondaryUsedPercent = response.rateLimits.rateLimits.secondary?.usedPercent
@@ -720,7 +723,7 @@ final class RunwayStore: ObservableObject {
     private static func displayPlanName(_ backendPlanType: String?) -> String {
         switch backendPlanType?.lowercased() {
         case "promax":
-            return "Pro Max 25×"
+            return "Pro Max 50×"
         case "pro":
             return "Pro 20×"
         case "prolite":
@@ -737,7 +740,21 @@ final class RunwayStore: ObservableObject {
             let data = defaults.data(forKey: defaultsKey),
             let decoded = try? JSONDecoder().decode([CodexAccount].self, from: data)
         {
-            accounts = decoded
+            accounts = decoded.map { saved in
+                var account = saved
+                let plan = account.planName.lowercased().replacingOccurrences(of: "×", with: "x")
+                if !plan.contains("50x"),
+                   plan.contains("25x") || plan.contains("promax") || plan.contains("pro max") {
+                    account.planName = "Pro Max 50×"
+                    // Older snapshots without an explicit weight used the
+                    // former 25x capacity. Preserve that history on migration.
+                    for index in account.snapshots.indices where account.snapshots[index].capacityUnits == nil {
+                        account.snapshots[index].capacityUnits = 5
+                    }
+                }
+                return account
+            }
+            if accounts != decoded { save() }
         } else {
             // New installs start empty. Refreshing any signed-in account adds a
             // row; the app has no opinion about how many accounts exist or tiers.

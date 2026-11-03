@@ -74,3 +74,5 @@ body{overflow:hidden}
 .chart svg{cursor:crosshair}
 
 .inspector[data-kind=heatmap] .inspector-row{display:block}.inspector[data-kind=heatmap] .inspector-label{margin-bottom:5px}.inspector[data-kind=heatmap] strong{display:block;text-align:left;white-space:nowrap}
+
+.account-benefits{margin-top:12px;padding-top:12px;border-top:1px solid var(--border,#e8e9ef)}.account-benefits .account-dates{margin-bottom:8px}.benefits-freshness{font-size:11px;color:#747786;margin:3px 0}.expiry-soon{color:#a45b0d!important}.account-settings-entry{padding-bottom:18px;margin-bottom:12px;border-bottom:1px solid #ececf2}.account-settings-entry:last-child{border-bottom:0;margin-bottom:0}.account-settings-entry .account-benefits{margin-top:0;border-top:0;padding-left:28px}.account-benefits td{white-space:normal}.account-benefits button{margin-top:8px}

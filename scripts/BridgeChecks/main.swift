@@ -93,6 +93,11 @@ struct BridgeChecks {
         let time = Date.now, reset = time.addingTimeInterval(72 * 3600)
         var first = CodexAccount(name: "Primary", email: "first@example.com", planName: "Pro 20×", externalAccountID: "one")
         var second = CodexAccount(name: "Reserve", email: "second@example.com", planName: "Pro 5×", externalAccountID: "two")
+        first.creditBalance = CreditBalanceSnapshot(balance: "12345.6789", unlimited: false, fetchedAt: time)
+        first.bankedResetDetails = BankedResetSnapshot(availableCount: 2, resets: [
+            BankedResetDetail(status: "available", grantedAt: time.addingTimeInterval(-86400), expiresAt: time.addingTimeInterval(3 * 86400), supportedByPlan: true),
+            BankedResetDetail(status: "available", grantedAt: time.addingTimeInterval(-86400), expiresAt: time.addingTimeInterval(28 * 86400), supportedByPlan: true)
+        ], fetchedAt: time)
         for index in 0..<100 {
             var sample = UsageSnapshot(capturedAt: time.addingTimeInterval(-Double(99 - index) * 3600), usedPercent: Double(index) * 0.5, resetAt: reset)
             sample.capacityUnits = 4; sample.windowDurationMins = 10080; first.snapshots.append(sample)
@@ -157,6 +162,10 @@ struct BridgeChecks {
         func wire(_ kind: String, _ args: [String: Any] = [:]) throws -> Data { try JSONSerialization.data(withJSONObject: ["version": 1, "kind": kind].merging(args) { _, new in new }) }
         func reply(_ input: Data) throws -> [String: Any] { try JSONSerialization.jsonObject(with: hub.reply(input)) as! [String: Any] }
         let before = store.accounts
+        let benefits = HubSnapshot.benefits(first, now: time)
+        try check((benefits["credits"] as? [String: Any])?["balance"] as? String == "12345.6789")
+        try check(benefits["bankedCount"] as? Int == 2 && benefits["earliestExpiry"] as? Double == time.addingTimeInterval(3 * 86400).timeIntervalSince1970)
+        try check(HubSnapshot.benefits(second, now: time)["credits"] is NSNull, "Missing credits are never a zero balance")
         let snapshot = try reply(wire("snapshot", ["section": "history"]))
         let report = CapacityForecast.report(accounts: store.accounts, now: time)
         let overview = snapshot["overview"] as! [String: Any]

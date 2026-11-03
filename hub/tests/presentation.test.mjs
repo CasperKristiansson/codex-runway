@@ -1,7 +1,22 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
-import {known,number,count,scale,health,series,heatmap,chartBounds,operationNotice,activityDetails,detailText,chartHoverIndex} from '../web/presentation.js';
+import {known,number,count,scale,health,series,heatmap,chartBounds,operationNotice,activityDetails,detailText,chartHoverIndex,accountBenefits} from '../web/presentation.js';
+test('account credits distinguish unknown, zero, unlimited and negative balances',()=>{
+ assert.equal(accountBenefits({}).credits,'Unavailable');
+ for(const balance of [null,'','not-a-number','Infinity'])assert.equal(accountBenefits({benefits:{credits:{balance}}}).credits,'Unavailable');
+ assert.equal(accountBenefits({benefits:{credits:{balance:'0'}}}).credits,'0');
+ assert.equal(accountBenefits({benefits:{credits:{balance:'-2.5'}}}).credits,'-2.5');
+ assert.equal(accountBenefits({benefits:{credits:{balance:null,unlimited:true}}}).credits,'Unlimited');
+ assert.equal(accountBenefits({benefits:{credits:{balance:'12345.6789'}}}).credits,number(12345.6789,2));
+});
+test('banked reset count and expiry distinguish no resets from missing details',()=>{
+ assert.equal(accountBenefits({}).banked,'Unavailable');
+ assert.equal(accountBenefits({bankedResets:2}).banked,'2');
+ assert.equal(accountBenefits({bankedResets:2}).expiry,'Unavailable');
+ assert.equal(accountBenefits({bankedResets:2,benefits:{bankedCount:0}}).banked,'0');
+ assert.equal(accountBenefits({benefits:{bankedCount:0}}).expiry,'No banked resets');
+});
 test('unknown is never zero',()=>{for(const value of [null,undefined,NaN,'12']){assert.equal(known(value),false);assert.equal(number(value),'—');assert.equal(scale(value,true),null);}assert.equal(number(0),'0');assert.equal(scale(4,true),100);});
 test('connection failure preserves saved view semantics',()=>{const data={available:true};assert.equal(health(data,100,200,false).stale,false);assert.equal(health(data,100,30000,false).stale,true);assert.equal(health(data,100,200,true).stale,true);assert.equal(health(null,100,200).text,'Runway unavailable');});
 test('heatmap uses UTC weeks and correct daily/weekly/cumulative totals',()=>{const now=Date.parse('2026-10-02T12:00:00Z'),days=[{date:'2026-09-28',tokens:10},{date:'2026-09-29',tokens:30}];assert.equal(heatmap(days,'Daily',now).flat().find(d=>d.date==='2026-09-29').value,30);assert.equal(heatmap(days,'Weekly',now).at(-1)[0].value,40);assert.equal(heatmap(days,'Cumulative',now).at(-1)[0].value,40);});

@@ -159,6 +159,7 @@ private struct AccountSettingsRow: View {
     private var index: Int? { store.accounts.firstIndex { $0.id == account.id } }
 
     var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
         HStack(alignment: .center, spacing: 16) {
             VStack(alignment: .leading, spacing: 3) {
                 Text("\(account.name) · \(account.planName)")
@@ -203,6 +204,16 @@ private struct AccountSettingsRow: View {
                 .help(account.isEnabled ? "Exclude from current capacity; saved History and Analytics stay included in All accounts" : "Activate this account in the dashboard and graph")
             }
             .fixedSize()
+        }
+        AccountBenefitsView(account: account, fullDetails: true)
+        Button(store.refreshingSavedAccountID == account.id || (store.isRefreshing && store.activeAccountID == account.id) ? "Refreshing…" : "Refresh usage and balances") {
+            Task {
+                if store.activeAccountID == account.id { await store.refreshActiveAccount() }
+                else { await store.refreshUsage(accountID: account.id) }
+            }
+        }
+        .disabled(store.loginActionsDisabled || store.loginRecoveryPending || (store.activeAccountID != account.id && !store.canRefreshUsage(for: account)))
+        if let error = store.savedUsageErrors[account.id] { Text(error).font(.caption).foregroundStyle(.red) }
         }
         .padding(.vertical, 4)
     }

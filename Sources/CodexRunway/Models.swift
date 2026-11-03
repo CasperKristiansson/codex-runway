@@ -65,6 +65,9 @@ struct CodexAccount: Codable, Identifiable, Equatable {
     var snapshots: [UsageSnapshot]
     var isEnabled: Bool
     var profile: AccountProfile? = nil
+    var creditBalance: CreditBalanceSnapshot? = nil
+    var bankedResetDetails: BankedResetSnapshot? = nil
+    var benefitsRefreshFailed: Bool? = nil
 
     init(
         id: UUID = UUID(),
@@ -94,6 +97,9 @@ struct CodexAccount: Codable, Identifiable, Equatable {
         snapshots = try values.decode([UsageSnapshot].self, forKey: .snapshots)
         isEnabled = try values.decodeIfPresent(Bool.self, forKey: .isEnabled) ?? true
         profile = try values.decodeIfPresent(AccountProfile.self, forKey: .profile)
+        creditBalance = try values.decodeIfPresent(CreditBalanceSnapshot.self, forKey: .creditBalance)
+        bankedResetDetails = try values.decodeIfPresent(BankedResetSnapshot.self, forKey: .bankedResetDetails)
+        benefitsRefreshFailed = try values.decodeIfPresent(Bool.self, forKey: .benefitsRefreshFailed)
     }
 
     var latestSnapshot: UsageSnapshot? {
@@ -106,11 +112,47 @@ struct CodexAccount: Codable, Identifiable, Equatable {
 
     var capacityUnits: Double? {
         let plan = planName.lowercased().replacingOccurrences(of: "×", with: "x")
-        // Check 25x before 5x: the former contains the latter. Also accept
-        // the fallback label saved by versions predating Pro Max support.
-        if plan.contains("25x") || plan.contains("promax") || plan.contains("pro max") { return 5 }
+        // Pro Max's current allowance is 50x. Legacy labels still identify
+        // the same tier; saved snapshots retain their historical weights.
+        if plan.contains("50x") || plan.contains("25x") || plan.contains("promax") || plan.contains("pro max") { return 10 }
         if plan.contains("20x") { return 4 }
         if plan.contains("5x") { return 1 }
         return nil
+    }
+}
+
+struct CreditBalanceSnapshot: Codable, Equatable, Sendable {
+    let balance: String?
+    let unlimited: Bool
+    let fetchedAt: Date
+
+    var displayBalance: String {
+        if unlimited { return "Unlimited" }
+        guard let balance, let value = Double(balance), value.isFinite else { return "Unavailable" }
+        return value.formatted(.number.precision(.fractionLength(0...2)))
+    }
+}
+
+struct BankedResetDetail: Codable, Equatable, Sendable {
+    let status: String
+    let grantedAt: Date?
+    let expiresAt: Date?
+    let supportedByPlan: Bool?
+
+    func isAvailable(at now: Date) -> Bool {
+        status == "available" && supportedByPlan != false && (expiresAt.map { $0 > now } ?? true)
+    }
+}
+
+struct BankedResetSnapshot: Codable, Equatable, Sendable {
+    let availableCount: Int
+    let resets: [BankedResetDetail]
+    let fetchedAt: Date
+
+    func remainingCount(at now: Date) -> Int {
+        max(0, availableCount - resets.filter { $0.status == "available" && $0.expiresAt.map { $0 <= now } == true }.count)
+    }
+    func earliestExpiry(at now: Date) -> Date? {
+        resets.filter { $0.isAvailable(at: now) }.compactMap(\.expiresAt).min()
     }
 }

@@ -20,6 +20,16 @@ enum HubSnapshot {
          "after": value.hasEstimate ? value.after as Any : NSNull(),
          "kind": value.projected ? "scheduled" : value.assumed ? "assumed" : "observed"]
     }
+    static func benefits(_ account: CodexAccount, now: Date) -> [String: Any] {
+        ["credits": account.creditBalance.map { ["balance": optional($0.balance), "unlimited": $0.unlimited, "fetchedAt": date($0.fetchedAt)] as [String: Any] } as Any? ?? NSNull(),
+         "bankedCount": optional(account.bankedResetDetails?.remainingCount(at: now) ?? account.latestSnapshot?.bankedResetCount),
+         "earliestExpiry": date(account.bankedResetDetails?.earliestExpiry(at: now)),
+         "resetsFetchedAt": date(account.bankedResetDetails?.fetchedAt),
+         "resets": account.bankedResetDetails?.resets.map {
+             ["status": safe($0.status), "grantedAt": date($0.grantedAt), "expiresAt": date($0.expiresAt), "supportedByPlan": optional($0.supportedByPlan)] as [String: Any]
+         } as Any? ?? NSNull(),
+         "refreshFailed": account.benefitsRefreshFailed ?? false]
+    }
     static func overview(store: RunwayStore, now: Date) -> [String: Any] {
         let report = CapacityForecast.report(accounts: store.accounts, now: now)
         let range = store.displayPreferences.range
@@ -60,6 +70,7 @@ enum HubSnapshot {
                     "resetAt": date(snapshot?.nextReset(at: now)), "fetchedAt": date(snapshot?.capturedAt),
                     "stale": snapshot.map { now.timeIntervalSince($0.capturedAt) > 30 * 60 } ?? true,
                     "bankedResets": optional(snapshot?.bankedResetCount),
+                    "benefits": benefits(account, now: now),
                     "secondaryUsedPercent": optional(snapshot?.secondaryUsedPercent), "secondaryResetAt": date(snapshot?.secondaryResetAt),
                     "savedLoginID": optional(store.savedLogin(for: account)?.id),
                     "canRefresh": account.id == store.activeAccountID ? !store.loginActionsDisabled && !store.loginRecoveryPending : store.canRefreshUsage(for: account),

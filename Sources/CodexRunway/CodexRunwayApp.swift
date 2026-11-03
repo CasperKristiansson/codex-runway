@@ -203,6 +203,7 @@ struct AccountCard: View {
     @EnvironmentObject private var store: RunwayStore
     let account: CodexAccount
     let isActive: Bool
+    var showsBenefits = false
 
     var body: some View {
         TimelineView(.periodic(from: .now, by: 60)) { context in
@@ -252,10 +253,13 @@ struct AccountCard: View {
                     VStack(alignment: .trailing, spacing: 2) {
                         Text("\(snapshot.remainingPercent(at: now), specifier: "%.0f")% left")
                             .font(.subheadline.weight(.medium))
-                        if snapshot.bankedResetCount > 0 {
-                            Text("\(snapshot.bankedResetCount) banked")
+                        if !showsBenefits {
+                            Text(popupBenefits(now: now))
                                 .font(.caption)
                                 .foregroundStyle(.secondary)
+                                .fixedSize()
+                                .help(account.creditBalance.map { "Credits: \($0.displayBalance) · Updated \(StatusDates.elapsed(since: $0.fetchedAt, now: now)). Full reset details are in Settings." }
+                                    ?? "Refresh usage to load this account’s credit balance.")
                         }
                     }
                 } else {
@@ -270,7 +274,8 @@ struct AccountCard: View {
                     .tint(isActive ? Color.indigo.opacity(0.7) : Color.gray.opacity(0.55))
                 TimelineView(.periodic(from: .now, by: 60)) { context in
                     let updated = "\(snapshot.assumesReset(at: context.date) ? "Reset assumed · Synced" : "Last updated"): \(StatusDates.elapsed(since: snapshot.capturedAt, now: context.date))"
-                    let reset = snapshot.nextReset(at: context.date).map { "Next reset: \(StatusDates.reset($0, now: context.date))" } ?? "Next reset: Unknown"
+                    let resetLabel = showsBenefits ? "Next allowance refill" : "Next reset"
+                    let reset = snapshot.nextReset(at: context.date).map { "\(resetLabel): \(StatusDates.reset($0, now: context.date))" } ?? "\(resetLabel): Unknown"
                     ViewThatFits(in: .horizontal) {
                         HStack {
                             Text(updated).fixedSize()
@@ -285,6 +290,10 @@ struct AccountCard: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
                 }
+            }
+            if showsBenefits {
+                Divider().padding(.vertical, 3)
+                AccountBenefitsView(account: account)
             }
         }
         .padding(10)
@@ -304,5 +313,18 @@ struct AccountCard: View {
                 .strokeBorder(isActive ? Color.indigo.opacity(0.8) : .white.opacity(0.8), lineWidth: isActive ? 2 : 1)
                 .allowsHitTesting(false)
         }
+    }
+
+    private func popupBenefits(now: Date) -> String {
+        let credits: String
+        if account.creditBalance?.unlimited == true {
+            credits = "Unlimited credits"
+        } else if let raw = account.creditBalance?.balance, let value = Double(raw), value.isFinite {
+            credits = "\(value.formatted(.number.precision(.fractionLength(0)))) credits"
+        } else {
+            credits = "Credits unavailable"
+        }
+        let count = account.bankedResetDetails?.remainingCount(at: now) ?? account.latestSnapshot?.bankedResetCount
+        return [credits, count.map { "\($0) banked" }].compactMap { $0 }.joined(separator: ", ")
     }
 }

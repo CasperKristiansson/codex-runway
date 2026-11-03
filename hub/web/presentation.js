@@ -5,6 +5,14 @@ const countFormats=Object.fromEntries(['long','short'].map(display=>[display,new
 export const count = (value, display='long') => !known(value)?'—':Math.abs(value)>=1000?countFormats[display].format(value):number(value,display==='short'?1:0);
 export const stamp = value => known(value) ? new Date(value*1000).toLocaleString(undefined,{month:'short',day:'numeric',hour:'2-digit',minute:'2-digit'}) : 'Unknown';
 export const scale = (value, percent) => known(value) ? value*(percent?25:1) : null;
+export function accountBenefits(account) {
+ const b=account.benefits||{},credits=b.credits;
+ const raw=credits?.balance;
+ const value=typeof raw==='string'&&raw.trim()!==''?Number(raw):NaN;
+ return {credits:credits?.unlimited?'Unlimited':known(value)?number(value,2):'Unavailable',
+  banked:known(b.bankedCount)?number(b.bankedCount):known(account.bankedResets)?number(account.bankedResets):'Unavailable',
+  expiry:known(b.earliestExpiry)?stamp(b.earliestExpiry):b.bankedCount===0?'No banked resets':'Unavailable'};
+}
 // Give a visible reset priority over denser readings within 12 screen pixels.
 // The pixel-to-time scale comes from the actual responsive plot, not its range.
 export function chartHoverIndex(times, resetDates, time, secondsPerPixel, snapPixels=12) {

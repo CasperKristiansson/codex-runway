@@ -28,6 +28,7 @@ private final class RefreshFixture {
     var profileShouldFail = false
     var profileEmail: String?
     var time = Date.now
+    var benefits = AccountBenefitsUpdate()
 }
 
 @main
@@ -49,8 +50,47 @@ struct StatusChecks {
         precondition(decodedResponse.rateLimits.primary.windowDurationMins == 10080)
         precondition(decodedResponse.rateLimits.secondary?.usedPercent == 5)
         precondition(decodedResponse.rateLimits.secondary?.resetsAt == nil)
+        let balanceData = Data(#"{"credits":{"balance":"12345.6789000000","unlimited":false}}"#.utf8)
+        let balance = try AccountBenefitsClient.balance(from: balanceData, now: now)
+        precondition(balance.balance == "12345.6789000000" && balance.fetchedAt == now)
+        precondition((try? AccountBenefitsClient.balance(from: Data(#"{"credits":null}"#.utf8), now: now)) == nil,
+            "Missing balances must remain unavailable, never zero")
+        let negative = try AccountBenefitsClient.balance(from: Data(#"{"credits":{"balance":"-2.5","unlimited":false}}"#.utf8), now: now)
+        precondition(negative.balance == "-2.5", "Overage balances can be negative")
+        let resetData = Data(#"{"available_count":2,"credits":[{"status":"available","granted_at":"2026-11-01T22:43:28.163033Z","expires_at":"2026-12-01T22:43:28.163033Z","is_supported_by_plan":true},{"status":"available","expires_at":"2026-11-12T10:00:00Z"},{"status":"redeemed","expires_at":"2026-11-04T10:00:00Z"}]}"#.utf8)
+        let resetDetails = try AccountBenefitsClient.resets(from: resetData, now: now)
+        let november = AccountBenefitsClient.parseDate("2026-11-03T09:00:00Z")!
+        precondition(resetDetails.remainingCount(at: november) == 2)
+        precondition(resetDetails.earliestExpiry(at: november) == AccountBenefitsClient.parseDate("2026-11-12T10:00:00Z"))
+        let later = AccountBenefitsClient.parseDate("2026-11-13T09:00:00Z")!
+        precondition(resetDetails.remainingCount(at: later) == 1 && resetDetails.earliestExpiry(at: later) == resetDetails.resets[0].expiresAt,
+            "Expired and redeemed resets cannot be advertised as usable")
+        precondition((try? AccountBenefitsClient.resets(from: Data(#"{"available_count":1,"credits":[{"status":"available","expires_at":"bad-date"}]}"#.utf8), now: now)) == nil)
         let defaults = UserDefaults(suiteName: suite)!
         defer { defaults.removePersistentDomain(forName: suite) }
+
+        // Cached and disabled accounts must show the new tier without signing
+        // in, while past usage keeps its original capacity and identity.
+        for label in ["Pro Max 25×", "Pro 25x", "ChatGPT promax", "ChatGPT Pro Max"] {
+            var historical = UsageSnapshot(capturedAt: now, usedPercent: 20, resetAt: now.addingTimeInterval(86_400))
+            historical.capacityUnits = 4
+            let unweighted = UsageSnapshot(capturedAt: now.addingTimeInterval(60), usedPercent: 30,
+                resetAt: now.addingTimeInterval(86_400))
+            var latest = UsageSnapshot(capturedAt: now.addingTimeInterval(120), usedPercent: 40,
+                resetAt: now.addingTimeInterval(86_400))
+            latest.capacityUnits = 5
+            let cached = CodexAccount(name: "Cached Max", email: "max@example.com", planName: label,
+                externalAccountID: "max-id", snapshots: [historical, unweighted, latest], isEnabled: false)
+            defaults.set(try JSONEncoder().encode([cached]), forKey: "codex-runway.accounts.v1")
+            let migrated = RunwayStore(defaults: defaults, analyticsEnabled: false).accounts[0]
+            var expected = cached
+            expected.planName = "Pro Max 50×"
+            expected.snapshots[1].capacityUnits = 5
+            precondition(migrated == expected && migrated.capacityUnits == 10,
+                "Migrate the saved tier without rewriting explicit historical weights or metadata")
+            precondition(RunwayStore(defaults: defaults, analyticsEnabled: false).accounts == [expected],
+                "Migration must persist and be idempotent")
+        }
 
         let legacy = CodexAccount(name: "Renamed account", email: "first@example.com", planName: "Pro")
         var legacyJSON = try JSONSerialization.jsonObject(with: JSONEncoder().encode([legacy])) as! [[String: Any]]
@@ -79,7 +119,7 @@ struct StatusChecks {
                 rateLimits: RateLimitsReadResponse(accountId: fixture.email, rateLimits: RateLimitSnapshot(
                     primary: LimitWindow(usedPercent: 42, resetsAt: Date.now.addingTimeInterval(3600).timeIntervalSince1970),
                     planType: fixture.limitPlanType
-                ), rateLimitResetCredits: ResetCredits(availableCount: 2))
+                ), rateLimitResetCredits: ResetCredits(availableCount: 2)), benefits: fixture.benefits
             )
         }
         precondition(store.accounts.first?.name == "Renamed account", "Legacy data must remain readable")
@@ -97,18 +137,28 @@ struct StatusChecks {
         precondition(store.accounts.count == 1 && store.accounts[0].latestSnapshot?.usedPercent == 42)
         precondition(fixture.profileCalls == 1, "15-minute checks must skip profiles younger than six hours")
         let beforeUpgrade = store.accounts[0]
+        fixture.benefits = AccountBenefitsUpdate(balance: balance, resets: resetDetails)
+        await store.refreshActiveAccount()
+        precondition(store.accounts[0].creditBalance == balance && store.accounts[0].bankedResetDetails == resetDetails)
+        precondition(RunwayStore(defaults: defaults).accounts[0].creditBalance == balance, "Benefits survive relaunch")
+        fixture.benefits = AccountBenefitsUpdate(failed: true)
+        await store.refreshActiveAccount()
+        precondition(store.accounts[0].creditBalance == balance && store.accounts[0].bankedResetDetails == resetDetails && store.accounts[0].benefitsRefreshFailed == true,
+            "Supplementary failures retain balances without failing quota refresh")
+        fixture.benefits = AccountBenefitsUpdate()
+        let historyBeforeUpgrade = store.accounts[0].snapshots
         fixture.planType = "promax"
         await store.refreshActiveAccount()
         precondition(store.accounts[0].id == beforeUpgrade.id && store.accounts.count == 1)
-        precondition(store.accounts[0].planName == "Pro Max 25×" && store.accounts[0].capacityUnits == 5)
-        precondition(store.accounts[0].snapshots.last?.capacityUnits == 5)
-        precondition(Array(store.accounts[0].snapshots.dropLast()) == beforeUpgrade.snapshots,
+        precondition(store.accounts[0].planName == "Pro Max 50×" && store.accounts[0].capacityUnits == 10)
+        precondition(store.accounts[0].snapshots.last?.capacityUnits == 10)
+        precondition(Array(store.accounts[0].snapshots.dropLast()) == historyBeforeUpgrade,
             "An upgrade must preserve historical capacity weights")
         precondition(RunwayStore(defaults: defaults).accounts == store.accounts, "Pro Max must persist")
         fixture.planType = nil
         fixture.limitPlanType = "promax"
         await store.refreshActiveAccount()
-        precondition(store.accounts[0].planName == "Pro Max 25×", "Rate-limit plan is the identity fallback")
+        precondition(store.accounts[0].planName == "Pro Max 50×", "Rate-limit plan is the identity fallback")
         fixture.planType = "pro"
         fixture.limitPlanType = "pro"
         await store.refreshActiveAccount()
