@@ -201,6 +201,82 @@ struct CapacityChecks {
         precondition(!observedReset.assumed, "A later reading with a new reset window confirms the historical reset")
         close(observedReset.after, 4)
         close(observedReset.date.timeIntervalSince(now), -6_500)
+
+        // A real refill is followed by repeated full, unused readings whose
+        // deadline moves with each poll. Re-reading saved history must retain
+        // the one refill, without inventing another at every observation.
+        func weeklyReading(at date: Date, used: Double, reset: Date? = nil) -> UsageSnapshot {
+            var snapshot = UsageSnapshot(capturedAt: date, usedPercent: used,
+                resetAt: reset ?? date.addingTimeInterval(7 * 86_400 - 2))
+            snapshot.windowDurationMins = 10_080
+            snapshot.capacityUnits = 4
+            return snapshot
+        }
+        let refillAt = now.addingTimeInterval(-14 * 3_600)
+        let exhaustedReading = weeklyReading(at: refillAt.addingTimeInterval(-900), used: 100, reset: refillAt)
+        let fullReadings = (0..<28).map { offset in
+            weeklyReading(at: refillAt.addingTimeInterval(300 + Double(offset) * 1_800), used: 0)
+        }
+        let floatingAccount = CodexAccount(name: "Unused", planName: "Pro 20×",
+            snapshots: [exhaustedReading] + fullReadings)
+        let originalReadings = floatingAccount.snapshots
+        let floatingReport = CapacityForecast.report(accounts: [floatingAccount], now: now)
+        let realRefills = floatingReport.resets.filter { !$0.projected }
+        precondition(realRefills.count == 1 && realRefills[0].date == refillAt && !realRefills[0].assumed)
+        close(realRefills[0].before, 0)
+        close(realRefills[0].after, 4)
+        close(floatingReport.remaining, 4)
+        close(floatingReport.ratePerHour!, 0)
+        precondition(floatingReport.resets.filter(\.projected).map(\.date) == [fullReadings.last!.resetAt],
+            "Keep the current server deadline, rather than anchoring it to the original refill")
+        precondition(floatingAccount.snapshots == originalReadings, "History repair must preserve the raw snapshots")
+        let idleObservations = CapacityDemand.observations(accounts: [floatingAccount], snapshots: [floatingAccount.snapshots])
+        precondition(idleObservations.count == fullReadings.count - 1)
+        close(idleObservations.reduce(0) { $0 + $1.units }, 0)
+        let idleRows = CapacityForecast.intervals(points: floatingReport.history, resets: floatingReport.resets,
+            start: refillAt.addingTimeInterval(-900), end: now, duration: 3_600)
+        precondition(idleRows.reduce(0) { $0 + $1.resets.count } == 1)
+        close(idleRows.reduce(0) { $0 + $1.consumedUnits }, 0)
+
+        // The first use anchors the new deadline. Its consumption belongs to
+        // this allowance, even though its deadline differs from the last poll.
+        var startedAccount = floatingAccount
+        let firstUse = weeklyReading(at: now, used: 3, reset: now.addingTimeInterval(7 * 86_400 - 600))
+        startedAccount.snapshots.append(firstUse)
+        let startedReport = CapacityForecast.report(accounts: [startedAccount], now: now)
+        precondition(startedReport.resets.filter { !$0.projected }.count == 1)
+        close(startedReport.remaining, 3.88)
+        let startedObservations = CapacityDemand.observations(accounts: [startedAccount], snapshots: [startedAccount.snapshots])
+        precondition(startedObservations.count == fullReadings.count)
+        close(startedObservations.reduce(0) { $0 + $1.units }, 0.12)
+        precondition(startedReport.resets.filter(\.projected).map(\.date) == [firstUse.resetAt])
+        let roundedFirstUse = weeklyReading(at: now, used: 0, reset: firstUse.resetAt)
+        precondition(CapacityForecast.continuesUnusedWindow(from: fullReadings.last!, to: roundedFirstUse))
+
+        // Real early refills still count, while expired floating placeholders
+        // and long unobserved gaps must not manufacture refills or usage.
+        let partial = weeklyReading(at: now.addingTimeInterval(-1_800), used: 80,
+            reset: now.addingTimeInterval(2 * 86_400))
+        let earlyRefill = CodexAccount(name: "Early", planName: "Pro 20×",
+            snapshots: [partial, weeklyReading(at: now, used: 0)])
+        let earlyReport = CapacityForecast.report(accounts: [earlyRefill], now: now)
+        precondition(earlyReport.resets.filter { !$0.projected }.count == 1)
+        close(earlyReport.resets.first!.after - earlyReport.resets.first!.before, 3.2)
+        precondition(CapacityDemand.observations(accounts: [earlyRefill], snapshots: [earlyRefill.snapshots]).isEmpty)
+        let gapAccount = CodexAccount(name: "Gap", planName: "Pro 20×", snapshots: [fullReadings[0]])
+        let afterPlaceholder = fullReadings[0].resetAt.addingTimeInterval(86_400)
+        precondition(CapacityForecast.report(accounts: [gapAccount], now: afterPlaceholder).resets.isEmpty)
+        let laterFull = weeklyReading(at: afterPlaceholder, used: 0)
+        precondition(CapacityDemand.observations(accounts: [gapAccount], snapshots: [[fullReadings[0], laterFull]]).isEmpty)
+        var incompatible = firstUse
+        incompatible.windowDurationMins = 300
+        precondition(!CapacityForecast.continuesUnusedWindow(from: fullReadings.last!, to: incompatible))
+        incompatible = firstUse
+        incompatible.capacityUnits = 10
+        precondition(!CapacityForecast.continuesUnusedWindow(from: fullReadings.last!, to: incompatible))
+        incompatible = weeklyReading(at: now, used: 0, reset: fullReadings.last!.resetAt.addingTimeInterval(-120))
+        precondition(!CapacityForecast.continuesUnusedWindow(from: fullReadings.last!, to: incompatible))
+
         var stale = tracked
         stale.snapshots = [UsageSnapshot(capturedAt: now.addingTimeInterval(-90_000), usedPercent: 40,
             resetAt: now.addingTimeInterval(3_600))]

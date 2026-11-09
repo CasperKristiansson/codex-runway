@@ -63,7 +63,8 @@ struct CapacityDemand {
                 let weight = newer.capacityUnits ?? fallbackWeight
                 guard newer.capturedAt > older.capturedAt,
                       older.resetAt > newer.capturedAt,
-                      abs(older.resetAt.timeIntervalSince(newer.resetAt)) < 60,
+                      (abs(older.resetAt.timeIntervalSince(newer.resetAt)) < 60
+                       || CapacityForecast.continuesUnusedWindow(from: older, to: newer)),
                       (older.capacityUnits ?? fallbackWeight) == weight,
                       newer.usedPercent >= older.usedPercent else { return nil }
                 return CapacityConsumption(accountIndex: index, start: older.capturedAt, end: newer.capturedAt,

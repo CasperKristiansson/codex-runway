@@ -85,6 +85,28 @@ enum CapacityForecast {
         weight * (1 - min(100, max(0, snapshot.usedPercent)) / 100)
     }
 
+    // Before an allowance is used, the service can report a full balance with
+    // resetAt = observation time + window length. This is a floating deadline,
+    // not evidence of another refill. Preserve the raw reading and future date.
+    static func hasFloatingReset(_ snapshot: UsageSnapshot) -> Bool {
+        guard snapshot.usedPercent == 0, let minutes = snapshot.windowDurationMins, minutes > 0 else { return false }
+        return abs(snapshot.resetAt.timeIntervalSince(snapshot.capturedAt) - Double(minutes) * 60) <= 60
+    }
+
+    static func continuesUnusedWindow(from older: UsageSnapshot, to newer: UsageSnapshot) -> Bool {
+        guard hasFloatingReset(older), let minutes = older.windowDurationMins,
+              newer.capturedAt > older.capturedAt,
+              newer.windowDurationMins == older.windowDurationMins,
+              newer.capacityUnits == older.capacityUnits,
+              newer.usedPercent >= older.usedPercent else { return false }
+        // The deadline may keep floating at 0%, or settle when use begins
+        // (including a first reading still rounded to 0%). A backwards move or
+        // a deadline beyond a whole window is not explained by this behavior.
+        return newer.resetAt.timeIntervalSince(older.resetAt) >= -60
+            && newer.resetAt.timeIntervalSince(newer.capturedAt) > 0
+            && newer.resetAt.timeIntervalSince(newer.capturedAt) <= Double(minutes) * 60 + 60
+    }
+
     // One Pro 20× allowance is four internal units and defines 100%.
     static func percentage(forUnits units: Double) -> Double { units * 25 }
 
@@ -147,7 +169,7 @@ enum CapacityForecast {
             for (offset, snapshot) in snapshots.enumerated() {
                 events.append((index: index, snapshot: snapshot, date: snapshot.capturedAt, reset: false, assumed: false))
                 let nextDate = offset + 1 < snapshots.count ? snapshots[offset + 1].capturedAt : now
-                if snapshot.resetAt > snapshot.capturedAt && snapshot.resetAt <= min(nextDate, now) {
+                if !hasFloatingReset(snapshot), snapshot.resetAt > snapshot.capturedAt && snapshot.resetAt <= min(nextDate, now) {
                     let next = offset + 1 < snapshots.count ? snapshots[offset + 1] : nil
                     let wasConfirmedLater = next.map { abs($0.resetAt.timeIntervalSince(snapshot.resetAt)) > 60 } ?? false
                     events.append((index: index, snapshot: snapshot, date: snapshot.resetAt, reset: true, assumed: !wasConfirmedLater))
@@ -161,7 +183,10 @@ enum CapacityForecast {
         for event in events {
             let previous = known[event.index]
             let date = event.date
-            let reset = event.reset || (!assumedAccounts.contains(event.index) && (previous.map { abs($0.resetAt.timeIntervalSince(event.snapshot.resetAt)) > 60 } ?? false))
+            let reset = event.reset || (!assumedAccounts.contains(event.index) && (previous.map {
+                abs($0.resetAt.timeIntervalSince(event.snapshot.resetAt)) > 60
+                    && !continuesUnusedWindow(from: $0, to: event.snapshot)
+            } ?? false))
             let before = known.reduce(0.0) { sum, pair in
                 let weight = pair.value.capacityUnits ?? accounts[pair.key].capacityUnits!
                 return sum + (assumedAccounts.contains(pair.key) ? weight : remaining(pair.value, weight: weight))

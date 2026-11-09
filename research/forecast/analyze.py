@@ -40,6 +40,19 @@ def metrics(rows):
             'p90_absolute_error':quantile([abs(e) for e in errors],.9),
             'mean_actual':mean([y for y,p in rows])}
 
+def has_floating_reset(snapshot):
+    minutes=snapshot.get('windowDurationMins')
+    return (snapshot['usedPercent']==0 and minutes is not None and minutes>0
+            and abs(snapshot['resetAt']-snapshot['capturedAt']-minutes*60)<=60)
+
+def continues_unused_window(old,new):
+    return (has_floating_reset(old) and new['capturedAt']>old['capturedAt']
+            and new.get('windowDurationMins')==old.get('windowDurationMins')
+            and new.get('capacityUnits')==old.get('capacityUnits')
+            and new['usedPercent']>=old['usedPercent']
+            and new['resetAt']-old['resetAt']>=-60
+            and 0<new['resetAt']-new['capturedAt']<=old['windowDurationMins']*60+60)
+
 def quota_intervals(accounts):
     valid=[]; audit=[]
     for i,acc in enumerate(accounts):
@@ -50,7 +63,8 @@ def quota_intervals(accounts):
             a,b=old['capturedAt']+EPOCH,new['capturedAt']+EPOCH
             w=new.get('capacityUnits',weight)
             if b<=a:reason='nonpositive_duration'
-            elif old['resetAt']+EPOCH<=b or abs(old['resetAt']-new['resetAt'])>=60:reason='reset_boundary'
+            elif old['resetAt']+EPOCH<=b or (abs(old['resetAt']-new['resetAt'])>=60
+                    and not continues_unused_window(old,new)):reason='reset_boundary'
             elif old.get('capacityUnits',weight)!=w:reason='plan_change'
             elif new['usedPercent']<old['usedPercent']:reason='decreasing_reading'
             else:reason='usable'

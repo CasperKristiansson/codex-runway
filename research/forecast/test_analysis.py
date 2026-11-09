@@ -20,6 +20,32 @@ class ForecastStudyChecks(unittest.TestCase):
         train=[(0,4*HOUR,1,0),(4*HOUR,8*HOUR,1,1)]
         self.assertAlmostEqual(quota_predict(train,10*HOUR,5,'app_30d'),1)
 
+    def test_unused_window_drift_and_first_use_are_observations(self):
+        week=7*24*HOUR
+        def reading(t,used,reset=None):
+            return {'capturedAt':t,'resetAt':reset if reset is not None else t+week-2,
+                    'usedPercent':used,'capacityUnits':4,'windowDurationMins':10080}
+        snapshots=[reading(0,100,HOUR),reading(2*HOUR,0),reading(3*HOUR,0),
+                   reading(4*HOUR,3,4*HOUR+week-600)]
+        intervals,audit=quota_intervals([{'planName':'Pro 20×','snapshots':snapshots}])
+        self.assertEqual(len(intervals),2)
+        self.assertEqual(audit[0]['intervals']['reset_boundary'],1)
+        self.assertAlmostEqual(sum(row[2] for row in intervals),.12)
+        snapshots[-1]['usedPercent']=0  # An anchored first use can still round to 0%.
+        intervals,_=quota_intervals([{'planName':'Pro 20×','snapshots':snapshots}])
+        self.assertEqual(len(intervals),2)
+        self.assertEqual(sum(row[2] for row in intervals),0)
+
+    def test_floating_deadlines_do_not_bridge_missing_windows_or_plan_changes(self):
+        week=7*24*HOUR
+        old={'capturedAt':0,'resetAt':week,'usedPercent':0,'capacityUnits':4,'windowDurationMins':10080}
+        for new in [dict(old,capturedAt=week+HOUR,resetAt=2*week+HOUR),
+                    dict(old,capturedAt=HOUR,resetAt=week+HOUR,capacityUnits=10),
+                    dict(old,capturedAt=HOUR,resetAt=week+HOUR,windowDurationMins=300),
+                    dict(old,capturedAt=HOUR,resetAt=week-120)]:
+            intervals,_=quota_intervals([{'planName':'Pro 20×','snapshots':[old,new]}])
+            self.assertEqual(intervals,[])
+
     def test_completed_endpoint_prevents_future_leak(self):
         origin=10*HOUR
         intervals=[(0,5*HOUR,1,0),(5*HOUR,20*HOUR,9,0)]
