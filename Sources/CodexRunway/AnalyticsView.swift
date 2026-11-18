@@ -39,6 +39,7 @@ struct AnalyticsView: View {
     @State private var messageGroup = "Model"
     @State private var planWindow = 10080
     @State private var planBreakdown = "thread_source"
+    @State private var showsAllPlanPeriods = false
     @State private var showsAllChats = false
 
     private let colors: [Color] = [
@@ -84,6 +85,7 @@ struct AnalyticsView: View {
             .padding(.vertical, 24)
         }
         .background(Color.white)
+        .onChange(of: selection) { _, _ in showsAllPlanPeriods = false }
     }
 
     private var header: some View {
@@ -178,6 +180,8 @@ struct AnalyticsView: View {
         let periods = saved.flatMap { account, archive in
             archive.planPeriods.filter { $0.windowMinutes == planWindow }.map { (account.name, $0) }
         }.sorted { $0.1.startsAt > $1.1.startsAt }
+        let previewCount = 5
+        let displayed = showsAllPlanPeriods ? periods[...] : periods.prefix(previewCount)
         return VStack(alignment: .leading, spacing: 12) {
             sectionHeader("Plan usage history", subtitle: "Five-hour and weekly plan-limit periods") {
                 Picker("Period", selection: $planWindow) {
@@ -185,6 +189,7 @@ struct AnalyticsView: View {
                     Text("Five-hour").tag(300)
                 }
                 .labelsHidden().frame(width: 140)
+                .onChange(of: planWindow) { _, _ in showsAllPlanPeriods = false }
                 Picker("Breakdown", selection: $planBreakdown) {
                     Text("By feature").tag("thread_source")
                     Text("By model").tag("model")
@@ -204,12 +209,19 @@ struct AnalyticsView: View {
                 if periods.isEmpty {
                     Text("No saved periods yet").foregroundStyle(.secondary).padding(18)
                 }
-                ForEach(Array(periods.enumerated()), id: \.offset) { _, item in
+                ForEach(Array(displayed.enumerated()), id: \.offset) { _, item in
                     planRow(accountName: item.0, period: item.1)
                     Divider()
                 }
             }
             .analyticsCard()
+            if periods.count > previewCount {
+                Button(showsAllPlanPeriods ? "Show less" : "Read more") { showsAllPlanPeriods.toggle() }
+                    .buttonStyle(.plain)
+                    .font(.system(size: 12))
+                    .padding(.horizontal, 12).padding(.vertical, 7)
+                    .background(Color(white: 0.96), in: Capsule())
+            }
         }
     }
 
